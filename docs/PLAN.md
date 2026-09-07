@@ -24,7 +24,7 @@ run locally; phases marked `env: Mac` are pure local development with no GPU dep
 - [ ] Vendor stb_image.h / stb_image_write.h + Catch2 under `third_party/`
 - [ ] Add test image fixtures under `tests/testdata/`
 - [x] Write `CLAUDE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/PROTOCOL.md`
-- [ ] `colab/run.ipynb` skeleton that clones the repo and builds (with a `!git pull` cell at the
+- [x] `colab/run.ipynb` skeleton that clones the repo and builds (with a `!git pull` cell at the
       top and an `nvidia-smi` / CUDA version print cell for drift visibility)
 - **Done when:** clean CPU-only build on Mac, and the notebook produces a CUDA build on Colab
 
