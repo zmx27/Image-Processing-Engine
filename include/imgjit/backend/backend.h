@@ -1,0 +1,89 @@
+#pragma once
+
+// The interface the server talks to, identical in the CPU and CUDA builds.
+//
+// SUBMIT/POLL FROM DAY ONE, even though the CPU backend has nothing to poll. The
+// tempting Phase 2 signature is a blocking `Image process(const Image&, const
+// OpChain&)`; it is fine now, fine in Phase 5, and impossible in Phase 6, where the
+// worker keeps K frames in flight and retires them by polling a completion event.
+// Adopting the blocking shape means redesigning the interface AND the worker loop at
+// exactly the
+// phase that introduces the event-gated-return invariant — the worst place in this
+// project to be changing structure (docs/PLAN.md Phase 2).
+//
+// THREADING: every method here is called on the worker thread and only there. That
+// is not an incidental property of the CPU backend, it is CLAUDE.md invariant 1 for
+// the CUDA one — which is why no implementation needs a lock.
+//
+// Portable: no CUDA, builds on macOS with no toolkit present. `allocate_slots`
+// returning std::byte* is what keeps it that way — the CUDA backend hands back pinned
+// host memory through the same signature, so invariant 1's grep still passes with the
+// pinned pool in place. (That grep is why no comment in this file spells a driver
+// entry point: a false positive in a header is exactly what teaches people to stop
+// running the check.)
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "imgjit/core/image.h"
+#include "imgjit/core/op_chain.h"
+
+namespace imgjit {
+
+// Backend-assigned. The server keeps handle -> {connection, seq_num, slot} and
+// releases the slot when the matching completion arrives — never before, and never
+// after the response is written (CLAUDE.md invariants 3 and 10).
+using JobHandle = std::uint64_t;
+
+struct FrameJob {
+  // Input pixels, living in a slot from allocate_slots(). Readable until the job's
+  // completion is returned from poll_completions().
+  const std::byte* input{nullptr};
+  int width{0};
+  int height{0};
+  int channels{0};
+  std::size_t stride{0};
+  OpChain chain;
+};
+
+enum class JobStatus : std::uint8_t {
+  kOk = 0,
+  // Maps to protocol status 6 (docs/PROTOCOL.md): the server stays alive.
+  kError = 1,
+};
+
+struct Completion {
+  JobHandle handle{0};
+  JobStatus status{JobStatus::kOk};
+  Image output;       // empty unless status == kOk
+  std::string error;  // empty when status == kOk
+};
+
+class IBackend {
+ public:
+  virtual ~IBackend() = default;
+
+  IBackend() = default;
+  IBackend(const IBackend&) = delete;
+  IBackend& operator=(const IBackend&) = delete;
+
+  // Allocates `count` contiguous slots of `bytes` each and returns the base pointer;
+  // slot i starts at base + i * bytes. Called once at worker startup — CPU: heap,
+  // CUDA: pinned host memory, allocated on the worker. The storage is owned by the backend
+  // and stays valid for its lifetime, which is what lets the Phase 4 slot pool own
+  // only indices and never storage.
+  virtual std::byte* allocate_slots(std::size_t count, std::size_t bytes) = 0;
+
+  // May complete the job immediately (the CPU backend does) or merely enqueue it.
+  // Either way the result is observed through poll_completions().
+  virtual JobHandle submit(const FrameJob& job) = 0;
+
+  // Returns every job finished since the last call, in no guaranteed order — from
+  // Phase 6 multi-stream completions genuinely retire out of submission order, which
+  // is the entire reason seq_num exists in the protocol.
+  virtual std::vector<Completion> poll_completions() = 0;
+};
+
+}  // namespace imgjit
