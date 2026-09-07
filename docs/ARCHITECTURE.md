@@ -35,7 +35,7 @@ defeating the memoization pillar. See `CLAUDE.md` invariant 4.
 
 ```
                   ┌──────────── Portable core (builds on macOS) ────────────┐
-  client(s) ──TCP─┤ acceptor thread → N connection threads                  │
+  client(s) ──TCP─┤ acceptor thread → per conn: reader + writer thread      │
                   │        ├─ read_exact() framing, header validation       │
                   │        ├─ claim pinned slot from free-list (blocking)   │
                   │        └─ recv() payload DIRECTLY into pinned slot      │
@@ -45,23 +45,25 @@ defeating the memoization pillar. See `CLAUDE.md` invariant 4.
                                            ↓ pop
                   ┌──── GPU worker thread — SOLE owner of CUcontext ────────┐
                   │  in-flight table (depth = #streams)                     │
-                  │    KernelKey ← hash(canonical chain + baked consts      │
-                  │                     + channels + naive|tiled)           │
+                  │    KernelKey ← hash(every codegen input — the           │
+                  │                     authoritative list is PLAN §3)      │
                   │    KernelCache: hit → CUfunction | miss → NVRTC → PTX   │
                   │                        → cuModuleLoadData               │
                   │    cuMemcpyHtoDAsync → cuLaunchKernel → DtoHAsync       │
                   │    cuEventRecord; poll events; retire ONLY on complete  │
                   └────────────────────────┬───────────────────────────────-┘
-                                           ↓ retire
-                  response tagged with seq → echo to conn and/or stb_image_write
+                                           ↓ retire (event confirmed complete)
+                  copy result out of slot → release pinned slot → free-list
                                            ↓
-                                  release pinned slot → free-list
+                       per-connection outbox (response tagged with seq)
+                                           ↓
+                  writer thread → echo to conn and/or stb_image_write
 ```
 
 The CPU backend implements the same `IBackend` interface as the CUDA backend, so the server is
 identical in both builds and the entire network path is testable on a Mac with no GPU at all.
 
-## The five load-bearing decisions
+## The six load-bearing decisions
 
 **1. One thread owns the CUcontext, forever.** The GPU worker calls `cuCtxCreate` once at startup
 and never releases or migrates it. No other thread makes any CUDA call. This sidesteps the whole
@@ -69,11 +71,11 @@ class of push/pop lifetime bugs and is auditable by grep (see `CLAUDE.md` invari
 
 **2. Pinned memory is a fixed pool allocated at startup, never per frame.** `cuMemAllocHost`
 requires a current context (so only the worker can allocate) and implicitly synchronizes (so
-per-frame allocation would serialize the pipeline it exists to parallelize). `N_SLOTS`
+per-frame allocation would serialize the pipeline it exists to parallelize). `kNumSlots`
 fixed-size pinned buffers are allocated on the worker at init; connection threads take indices
 from a free-list and `recv()` straight into pinned memory — no staging copy on ingest.
 
-Deliberate consequences: fixed slots force a `MAX_FRAME_BYTES` cap (oversized frames are
+Deliberate consequences: fixed slots force the `kMaxPayloadBytes` cap (oversized frames are
 rejected before any allocation — never trust an attacker-controlled length), and **free-list
 exhaustion is the backpressure mechanism**. A connection thread blocks on slot claim, which stops
 it `recv()`ing, which fills the client's send buffer through TCP flow control. That's correct
@@ -90,11 +92,27 @@ the project's point: a `pop → copy → launch → sync → respond` loop seria
 makes multiple streams worthless. The worker is a state machine — fill idle stream slots from the
 queue, record an event per slot, poll and retire each iteration.
 
-**5. Stencil ops are the fusion boundary.** Pointwise ops (grayscale, invert,
-brightness/contrast, threshold) fuse into registers at zero memory cost. Stencil ops (Gaussian,
-Sobel) need neighbors and terminate a stage. Codegen emits at most `#stencil_ops + 1` kernels,
-with pointwise runs folded into the adjacent stage's prologue/epilogue. Capping the op set at
-~6 keeps this honest.
+**5. Stencil ops are the fusion boundary.** Pointwise ops (`grayscale`, `invert`, `brightness`,
+`threshold`) fuse into registers at zero memory cost. Stencil ops (`gaussian`, `sobel`) need
+neighbors and terminate a stage. Codegen emits at most `#stencil_ops + 1` kernels, with pointwise
+runs folded into the adjacent stage's prologue/epilogue. The op set is **closed at these six**
+(see `docs/PLAN.md` Phase 2) — that cap is what keeps the fusion story honest.
+
+**6. The worker never touches a socket, and slot release is never gated on a socket write.**
+Completions land in a per-connection outbox that a writer thread drains; the reader thread does
+framing and slot claim only. Two distinct failures make this structural rather than stylistic.
+
+If the *worker* wrote responses, a single slow client would head-of-line-block the entire GPU
+pipeline — the whole point of decision 4 undone by one `send()`, and it would surface as an
+inexplicable throughput cliff in Phase 6 rather than as an obvious bug.
+
+If a slot were released only *after* its response was written, a pipelining client would deadlock
+its connection. The client sends frames 1..N before reading any response (which the `seq_num`
+design explicitly invites); the reader thread blocks claiming a slot for frame N+1; the response
+for frame 1 is never written, so its slot is never freed, so the reader never unblocks. Releasing
+on event completion breaks the cycle — which means **the echoed payload must be copied out of the
+slot before release**, and that copy is the price of the property. It is worth it: the alternative
+is a deadlock that only appears under pipelining, which is exactly the load the benchmarks run.
 
 ## Pitfalls to plan around
 
@@ -106,16 +124,29 @@ with pointwise runs folded into the adjacent stage's prologue/epilogue. Capping 
   call, and an illegal-access error can poison the context permanently. Scope decision: tear down
   and recreate the context (flushing the kernel cache and device pool with it), reject in-flight
   work, resume. This is a deliberate, documented limitation, not an oversight.
+- **NVRTC source must be self-contained, and there is no `kernels/` directory.** NVRTC has no
+  default include path, so generated source cannot `#include <cstdint>` (and must not include
+  `<cuda_runtime.h>` — that is invariant 8). The stable device helpers therefore live in
+  `src/backend/cuda/kernel_prelude.h` as a single raw-string literal, not as `.cu` template files.
+  Codegen is structural string assembly, not template substitution — stage count, fusion
+  boundaries and unrolled weights all vary — so only ~50 lines are actually stable text, and
+  putting those in files would buy syntax highlighting at the cost of a runtime path dependency
+  (or a CMake embed step) plus fragments no compiler can check. The readability need is served
+  from the other end: a `--dump-source` flag prints the *generated* kernel, which is what you
+  actually read when debugging.
 - **No CUDA Runtime API, anywhere.** Not `cudaMalloc`, not `<<<>>>`, and no Runtime-backed
   dependency (Thrust/CUB) — they create an implicit primary context that conflicts with our
   explicit one.
 - **Colab's network is sandboxed.** You cannot reach a Colab server from outside it. The GPU demo
   is loopback *within the container*; genuine multi-machine testing happens against the CPU
   backend instead. Stated plainly here rather than implied.
-- **stb is not part of the wire protocol.** Raw contiguous pixels go over the socket; stb is a
-  CLI/test-side file decode convenience only. The server never decodes PNG/JPEG from the network.
+- **stb is not part of the wire protocol.** Raw contiguous pixels go over the socket, and the
+  server never *decodes* PNG/JPEG from network input — `stb_image` is a CLI/test-side file
+  convenience only. Encoding is the exception: the server-side write path (`flags` bit 1) does use
+  `stb_image_write` to emit a PNG, which is a file-output concern and never touches the wire.
 - **NVRTC cold-start is ~50–200 ms.** Exactly why the cache exists; cold-vs-warm is a legitimate
-  benchmark line. Prewarm common chains at startup.
+  benchmark line. A configured chain list is prewarmed at startup (Phase 5) so this claim maps to
+  a measured row rather than staying an aspiration.
 - **Transport `uint8`, compute `float`.** Convert in-kernel, write back `uint8`. Halves PCIe
   traffic versus float transport.
 - **Compare with tolerance, never bit-equality**, for stencil ops — FMA contraction and
@@ -142,15 +173,15 @@ image-processing/
 ├── include/imgjit/           # public headers, mirrors src/ layout
 ├── src/
 │   ├── core/                 # Image, OpChain IR, parser, canonicalizer      (portable)
-│   ├── net/                  # framing, server, connection threads, client   (portable)
+│   ├── net/                  # framing, server, reader/writer threads, client (portable)
 │   ├── util/                 # queue, slot pool, logging, stb wrappers       (portable)
 │   ├── backend/cpu/          # scalar reference implementation               (portable)
 │   └── backend/cuda/         # driver-API context, NVRTC codegen, cache, RAII (CUDA only)
-├── kernels/                  # CUDA source templates consumed by the codegen
+│       └── kernel_prelude.h  #   stable device helpers as one raw-string literal
 ├── tests/                    # unit + integration, with testdata/ fixtures
 ├── bench/                    # benchmark harness and result CSVs
 ├── tools/                    # imgjit-server, imgjit-client, imgjit-cli
-└── third_party/               # vendored stb_image, stb_image_write, Catch2
+└── third_party/              # vendored stb_image, stb_image_write, Catch2
 ```
 
 ## Verification strategy

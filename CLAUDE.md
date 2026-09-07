@@ -21,23 +21,34 @@ Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.
 
 1. **CUcontext ownership**: only the GPU worker thread ever calls a CUDA Driver API function.
    `cuCtxCreate` runs once at startup on that thread and is never released or migrated. No file
-   outside `src/backend/cuda/` may `#include <cuda.h>`.
-   Verify: `grep -rE '\bcu[A-Z]' src/ | grep -v backend/cuda/`
+   outside `src/backend/cuda/` may `#include <cuda.h>` or `<nvrtc.h>`.
+   Verify: `grep -rE '\b(cu[A-Z]|CU[a-z]|nvrtc)' src/ include/ | grep -v backend/cuda/`
+   The alternation matters: `cu[A-Z]` alone catches calls but misses every CUDA *type*
+   (`CUstream`, `CUevent`, `CUmodule`, `CUdeviceptr` are `CU[a-z]`) and all of NVRTC — and a
+   leaked type in a `util/` or `net/` header is exactly the escape this invariant exists to
+   prevent. `include/` is scanned because public headers leak the furthest.
 2. **Pools, not per-frame allocation.** Pinned and device buffers come from pools allocated once
    at worker startup. Never `cuMemAllocHost`/`cuMemAlloc` in the per-frame path — both require a
    current context and the pinned call implicitly synchronizes, serializing the pipeline.
+   One documented exemption: the Phase 3 file-in/file-out CLI has no pipeline to serialize and
+   may allocate intermediate device buffers per invocation (see `docs/PLAN.md` Phase 3). The
+   exemption ends at Phase 5 — do not let it leak into the server path.
 3. **Event-gated buffer return.** A buffer returns to its pool only after its `CUevent` is
    confirmed complete — never on return of the async copy or launch that used it. This is the
    most important invariant in the codebase: violating it silently corrupts data instead of
    crashing.
-4. **Kernel cache key = hash(canonicalized op chain + baked constants + channels + naive/tiled
-   variant).** It must NOT include width/height — dimensions are launch-time arguments, not part
-   of the compiled kernel identity. Baking them would make every new resolution a cache miss and
-   grow the cache unboundedly, defeating memoization. Any new codegen input must be added to the
-   key or the cache goes stale.
+4. **The kernel cache key is every codegen input, and nothing else.** It must NOT include
+   width/height — dimensions are launch-time arguments, not part of the compiled kernel identity.
+   Baking them would make every new resolution a cache miss and grow the cache unboundedly,
+   defeating memoization. Conversely, any new codegen input must be added to the key or the cache
+   returns a stale kernel — which surfaces as a wrong benchmark number, not a crash.
+   The authoritative field list lives in `docs/PLAN.md` Phase 3 (one copy, deliberately: it grew
+   in Phases 7 and 8, and duplicated definitions drift).
 5. **Backpressure is slot-pool exhaustion.** Connection threads block on slot claim, which stops
    them `recv()`ing, which backs up through TCP flow control to the client. Never drop frames
-   silently; never grow the pool at runtime.
+   silently; never grow the pool at runtime. (The `DropOldest` stretch item is compatible with
+   this: it is opt-in by flag and increments a visible drop counter. *Silently* is the operative
+   word — an unconfigured build never drops.)
 6. **Wire format is little-endian, packed field by field** (see `docs/PROTOCOL.md`). Never
    `memcpy` a struct onto a socket. Validate and cap declared length BEFORE allocating anything.
 7. **All socket reads go through `read_exact()`.** A bare `recv()` is a bug — TCP is a byte
@@ -47,6 +58,13 @@ Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.
    the GPU worker owns explicitly.
 9. **Every kernel has a scalar CPU equivalent** in `src/backend/cpu/` — it is the correctness
    oracle for every GPU test.
+10. **The GPU worker never touches a socket, and slot release is never gated on a socket write.**
+   Completions go to a per-connection outbox; a writer thread drains it. Two failure modes make
+   this load-bearing rather than stylistic: if the worker writes responses, one slow client
+   head-of-line-blocks the whole pipeline; and if a slot is only released after its response is
+   written, a pipelining client deadlocks the connection (the reader thread blocks on slot claim,
+   so it never writes the response that would free the slot). The echoed payload is therefore
+   copied out of the slot before release. See `docs/ARCHITECTURE.md` → "The response path".
 
 ## Conventions
 

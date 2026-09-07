@@ -34,24 +34,75 @@ Two checkpoints in one phase, so a failure is unambiguous about which layer brok
 
 - [ ] **1a:** `cuInit` → `cuCtxCreate` → load a PTX blob produced by `nvcc --ptx` (ahead of time)
       → `cuModuleLoadData` → `cuLaunchKernel`. Proves driver plumbing with JIT out of the picture.
+      Build that PTX with an `add_custom_command` invoking `${CUDAToolkit_NVCC_EXECUTABLE}`, or
+      just check the `.ptx` in as a fixture — **do not** enable the CUDA language in CMake to get
+      it. `project(imgjit LANGUAGES CXX)` is deliberate: NVRTC compiles at runtime, so a CUDA
+      toolchain in the build is unnecessary, and enabling it invites `<<<>>>` and cudart linkage
+      (invariant 8).
 - [ ] **1b:** swap the AOT blob for `nvrtcCompileProgram` at runtime. Proves JIT plumbing on top
       of already-working driver plumbing.
 - [ ] `CU_CHECK` / `NVRTC_CHECK` macros; dump generated PTX to disk for inspection
 - **Done when:** Colab inverts a real PNG on-GPU, output exactly matches scalar CPU inversion
       (exact is the right bar here — integer pointwise op, no float reassociation)
 
+This phase is a **spike**, and it runs before Phase 2 deliberately: its job is to find out early
+whether the Colab workflow is tolerable (see `ARCHITECTURE.md` → Open risk). Consequences:
+
+- The oracle here is a throwaway inline inversion loop, **not** the Phase 2 CPU backend — that
+  backend and the `Image` type do not exist yet. Do not block Phase 1 on building them.
+- What must *survive* the spike into `src/backend/cuda/` is `CU_CHECK` / `NVRTC_CHECK` and the
+  RAII wrappers for `CUcontext`, `CUmodule`, `CUdeviceptr`. The driver-plumbing scratch code
+  around them is expendable.
+
 ## Phase 2 — Portable core · env: Mac
 
 - [ ] `Image` type (`uint8`, 1/3/4 channels, row-major, explicit stride)
 - [ ] `OpChain` IR + parser for `"grayscale,gaussian:1.4,sobel,threshold:0.3"`
 - [ ] Canonicalizer + `KernelKey` hash — **excludes width/height** by construction
-- [ ] CPU backend implementing all ops; stb load/save wrappers; `tools/imgjit-cli`
+- [ ] `IBackend` interface — see below; get the shape right here, not in Phase 6
+- [ ] CPU backend implementing the closed op set; stb load/save wrappers; `tools/imgjit-cli`
 - [ ] Tests: parser, canonicalizer, hash stability, each filter vs. checked-in fixtures
 - **Done when:** `imgjit-cli --ops "grayscale,sobel" in.png out.png` works on the Mac; tests green
+
+**The op set is closed at six** — pointwise: `grayscale`, `invert`, `brightness`, `threshold`;
+stencil: `gaussian`, `sobel`. Adding ops is the #1 over-scoping risk named in `ARCHITECTURE.md`;
+the list is fixed here so later phases have a finite corpus to be complete against.
+
+**Canonicalization is parameter normalization only — never reordering.** Op order is semantically
+load-bearing (`gaussian→sobel` ≠ `sobel→gaussian`), so the canonicalizer only normalizes
+whitespace, float formatting (`gaussian:1.40` → `gaussian:1.4`), and implicit defaults made
+explicit. Additionally, **quantize σ before hashing** (e.g. to 2 decimals): `gaussian:1.4` and
+`gaussian:1.4000001` bake identical weights, and without quantization they become two cache
+entries for one kernel.
+
+**`IBackend` is submit/poll from day one, even though the CPU backend has nothing to poll.**
+
+    submit(FrameJob) -> JobHandle          // may complete immediately
+    poll_completions() -> vector<Completion>
+
+The tempting Phase 2 signature is a blocking `Image process(const Image&, const OpChain&)`. It is
+fine for Phase 2, fine for Phase 5 — and impossible in Phase 6, where the worker keeps K frames
+in flight and retires them by event poll. Adopting the blocking shape means redesigning both the
+interface *and* the worker loop at precisely the phase that introduces the event-gated-return
+invariant, which is the worst place in the project to be changing structure. The CPU backend
+simply completes inside `submit` and returns the completion from the next `poll_completions()`;
+the server loop is then a state machine from Phase 4 onward and Phase 6 changes only the backend.
+
+The interface must also allocate the frame slots (see Phase 4):
+
+    allocate_slots(count, bytes) -> std::byte*   // CPU: heap. CUDA: cuMemAllocHost on the worker.
+
+Returning `std::byte*` keeps every CUDA type inside `src/backend/cuda/`, so invariant 1's grep
+still passes with the pinned pool in place.
 
 ## Phase 3 — Codegen + kernel cache · env: Colab
 
 - [ ] `emit_cuda_source(OpChain) → std::string`; one kernel per stencil stage, pointwise ops fused
+- [ ] `src/backend/cuda/kernel_prelude.h` — stable device helpers (clamp, luminance, `uint8`↔
+      `float`, clamped indexing) as one raw-string literal; **no `kernels/` directory**, and the
+      emitted source stays self-contained since NVRTC has no default include path
+- [ ] `--dump-source` flag alongside Phase 1's PTX dump — the generated kernel is what you read
+      when debugging, not the fragments
 - [ ] Bake radius / weights / threshold / channels as literals; dimensions stay launch arguments
 - [ ] `KernelCache: KernelKey → {CUmodule, CUfunction}` with a compile counter for assertions
 - [ ] Multi-stage execution with intermediate device buffers
@@ -60,6 +111,18 @@ Two checkpoints in one phase, so a failure is unambiguous about which layer brok
       chain provably compiles exactly once (compile counter unchanged), **and** the same chain at
       three different resolutions still compiles only once
 
+**Every codegen input must be in `KernelKey`.** Two inputs arrive in later phases and are easy to
+forget, because omitting them produces a stale cache hit rather than a failure — a wrong benchmark
+number, not a crash: the **tile size** from Phase 7 (baked into `__shared__` array dimensions, so
+a naive|tiled boolean is not sufficient) and the **baked|parameterized constants mode** from
+Phase 8's A/B axis. Reserve both in the key now.
+
+**Invariant-2 exemption, scoped to this phase.** `CLAUDE.md` invariant 2 forbids `cuMemAlloc` in
+the per-frame path. Phase 3 is a one-image-at-a-time CLI with no pipeline to serialize, so
+allocating intermediate device buffers per invocation is acceptable *here only*. The device pool
+arrives in Phase 6 and the invariant applies unconditionally from that point. This is a stated
+exemption, not an oversight — do not "fix" it early, and do not let it leak into Phase 5.
+
 ## Phase 4 — Network layer · env: Mac (CPU backend)
 
 - [ ] `docs/PROTOCOL.md` implemented as pure encode/decode functions
@@ -67,45 +130,101 @@ Two checkpoints in one phase, so a failure is unambiguous about which layer brok
       error responses
 - [ ] Codec unit tests including malformed input: bad magic, truncated header, length mismatch,
       oversized payload
-- [ ] Acceptor + per-connection threads; bounded MPSC queue; slot pool with per-connection caps
+- [ ] Validation order + per-error-code connection disposition (drain vs. close) per
+      `docs/PROTOCOL.md`; desync test: an error frame followed by a valid frame on the same
+      connection must still be served correctly
+- [ ] `tools/imgjit-server`; acceptor + **reader and writer thread per connection**; bounded MPSC
+      queue; per-connection outbox; slot pool with per-connection caps
 - [ ] `tools/imgjit-client`; both result paths (echo, server-side write); blocking backpressure
       verified with an artificially throttled worker
+- [ ] Pipelining test: client sends N frames before reading any response — the case that deadlocks
+      if slot release is gated on the socket write
 - [ ] Integration test: N clients × M frames, verified against the CPU oracle
 - **Done when:** multi-client localhost run is correct and clean under **ASan and TSan**
+
+**The slot pool owns indices, not storage.** Phase 5 replaces its backing memory with pinned
+buffers that `cuMemAllocHost` must allocate *on the worker thread at startup* — a change of
+lifetime owner, not a one-line swap. Written the natural way (pool `new`s its own storage in its
+constructor), Phase 5 rewrites the pool. Written correctly, the pool holds only the free-list,
+the per-connection caps, and the blocking claim, and receives its backing storage from
+`IBackend::allocate_slots()` at init — so Phase 5 touches zero lines of pool logic.
+
+**The client keeps a `seq_num → pending` map, and the integration test compares sets.** The
+obvious Phase 4 client sends a frame and reads one response; that is correct now and silently
+wrong from Phase 6 on, when multi-stream completions retire out of order — which is the entire
+reason `seq_num` is in the protocol. Building the FIFO assumption in means rewriting the client
+and the integration test during the async phase. Verify the *set* of responses and match each by
+`seq_num`, never by arrival order.
+
+**The response path is decided here, and it is `CLAUDE.md` invariant 10.** The worker never
+writes to a socket, and a slot is released the moment its work completes — never after its
+response has been written. Concretely: reader thread does framing and slot claim; worker
+processes and, on completion, copies the result out of the slot, releases the slot, and pushes
+the response to that connection's outbox; writer thread drains the outbox.
+
+Both halves are load-bearing. A worker that writes sockets lets one slow client head-of-line-block
+the whole pipeline (invisible until Phase 6, where it looks like a mystery throughput cliff). And
+release-after-write deadlocks any pipelining client: the reader blocks claiming a slot for frame
+N+1, so the response for frame 1 is never written, so its slot never frees. The copy-out is the
+price of breaking that cycle, and it is why the pipelining test above exists.
+
+**ASan and TSan are two build configurations, not one.** They cannot be linked into the same
+binary; the gate is two ctest presets over the same test set.
 
 ## Phase 5 — Integration: GPU worker behind the server · env: Colab
 
 - [ ] Swap the CPU worker for the GPU worker; `cuCtxCreate` once at startup on that thread
 - [ ] Pinned slot pool allocated on the worker; connection threads `recv()` directly into slots
 - [ ] **Single stream only** — isolate "is the plumbing correct" from async overlap
+- [ ] Startup prewarm of a configured chain list — `ARCHITECTURE.md` claims it, and Phase 8's
+      gate requires every such claim to map to a measured row
+- [ ] Minimal timing harness (FPS, p50/p99 round-trip) and a **recorded baseline** committed to
+      the repo
 - **Done when:** concurrent loopback clients with differing chains all match the CPU oracle on
       Colab; TSan clean; no CUDA symbol reachable outside `src/backend/cuda/`
+
+Phases 6 and 7 are both gated on being "measurably faster" — which requires a number recorded
+*here*, with the harness that produced it. `bench/` in Phase 8 then widens the matrix rather than
+inventing the measurement, and each phase gate from this point records its numbers under the same
+harness so the comparisons are like-for-like.
 
 ## Phase 6 — Async multi-stream pipeline · env: Colab
 
 - [ ] In-flight table across K streams (start K=4); `cuEventRecord` + poll-and-retire
 - [ ] Event-gated buffer return; device memory pool replacing any per-frame `cuMemAlloc`
 - [ ] Instrument queue depth, occupancy, stall counts
+- [ ] **Context recreation** — teardown/rebuild as a unit: flush the kernel cache and device pool,
+      fail every in-flight job with status 6, resume accepting work
 - [ ] Stress test: sustained repeated runs with output checksums, specifically targeting
       premature slot reuse (`CLAUDE.md` invariant 3)
-- **Done when:** measurably faster than the Phase 5 sync path, Nsight Systems shows genuine
+- **Done when:** measurably faster than the Phase 5 recorded baseline, Nsight Systems shows genuine
       H2D/compute/D2H overlap rather than serialized segments, and zero checksum drift under stress
+
+Context recreation lands here, not in Phase 8, because it is a *design constraint on these
+structures* rather than a feature bolted on afterwards: recovery means destroying the kernel
+cache, the device pool, and the in-flight table together and rebuilding them. Retrofitting that
+two phases after the in-flight table is built is invasive surgery on the most delicate code in the
+project. Build them destroyable-as-a-unit now; Phase 8 only injects the fault and observes.
 
 ## Phase 7 — Shared-memory tiling · env: Colab
 
 - [ ] Tiled stencil codegen variant: `__shared__` tile + halo/apron loads, bounds-clamped,
       parameterized by tile size
-- [ ] Extend `KernelKey` with the naive|tiled variant; both remain runtime-selectable
+- [ ] Extend `KernelKey` with the naive|tiled variant **and the tile size** — the tile dimensions
+      are baked into the `__shared__` array, so a boolean variant flag would collide two different
+      kernels onto one key; both variants remain runtime-selectable
 - **Done when:** tiled output matches naive and CPU within tolerance, and is measurably faster on
       both Gaussian and Sobel
 
 ## Phase 8 — Benchmarks + polish · env: Colab
 
-- [ ] `bench/` CSV harness over the orthogonal matrix: naive|tiled × sync|async, plus
-      fused-vs-unfused chain, cold-vs-warm cache, baked-vs-parameterized constants
+- [ ] `bench/` CSV harness — widens the Phase 5 timing harness over the orthogonal matrix:
+      naive|tiled × sync|async, plus fused-vs-unfused chain, cold-vs-warm cache,
+      baked-vs-parameterized constants (the constants mode must already be a `KernelKey` input —
+      see Phase 3, or the parameterized run silently reuses the baked kernel)
 - [ ] Sweep 512² → 4K and chain lengths; report FPS, GB/s, p50/p99 round-trip latency
-- [ ] Error-injection pass: malformed protocol, forced illegal access → confirm context
-      recreation rather than crash
+- [ ] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
+      context recreation holds under fault, and that the server survives
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
 - **Done when:** every architectural claim in `ARCHITECTURE.md` maps to a number in the table
 
