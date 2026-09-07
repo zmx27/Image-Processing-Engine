@@ -30,23 +30,22 @@ run locally; phases marked `env: Mac` are pure local development with no GPU dep
 
 ## Phase 1 — Driver API + JIT spike · env: Colab
 
-**next:** code is written (`src/backend/cuda/{cuda_check,cuda_raii,nvrtc_compile}.h`,
-`tools/{invert_aot.cu,imgjit-spike.cpp}`) and the Mac CPU-only build is clean, but the boxes stay
-unchecked until a Colab run confirms both checkpoints. Run `colab/run.ipynb` top to bottom; the
-spike is registered with ctest, so the existing test cell covers it.
+**Done.** Verified on Colab (T4, driver 580.82.07, CUDA 13.0, nvcc 12.8.93, `compute_75`): both
+ctest cases (`phase1_spike_checkerboard_16x16_rgb`, `phase1_spike_gradient_32x32_rgba`) passed,
+and `imgjit-spike` reported exact match against the CPU oracle for both checkpoints.
 
 Two checkpoints in one phase, so a failure is unambiguous about which layer broke:
 
-- [ ] **1a:** `cuInit` → `cuCtxCreate` → load a PTX blob produced by `nvcc --ptx` (ahead of time)
+- [x] **1a:** `cuInit` → `cuCtxCreate` → load a PTX blob produced by `nvcc --ptx` (ahead of time)
       → `cuModuleLoadData` → `cuLaunchKernel`. Proves driver plumbing with JIT out of the picture.
       Build that PTX with an `add_custom_command` invoking `${CUDAToolkit_NVCC_EXECUTABLE}`, or
       just check the `.ptx` in as a fixture — **do not** enable the CUDA language in CMake to get
       it. `project(imgjit LANGUAGES CXX)` is deliberate: NVRTC compiles at runtime, so a CUDA
       toolchain in the build is unnecessary, and enabling it invites `<<<>>>` and cudart linkage
       (invariant 8).
-- [ ] **1b:** swap the AOT blob for `nvrtcCompileProgram` at runtime. Proves JIT plumbing on top
+- [x] **1b:** swap the AOT blob for `nvrtcCompileProgram` at runtime. Proves JIT plumbing on top
       of already-working driver plumbing.
-- [ ] `CU_CHECK` / `NVRTC_CHECK` macros; dump generated PTX to disk for inspection
+- [x] `CU_CHECK` / `NVRTC_CHECK` macros; dump generated PTX to disk for inspection
 - **Done when:** Colab inverts a real PNG on-GPU, output exactly matches scalar CPU inversion
       (exact is the right bar here — integer pointwise op, no float reassociation)
 
