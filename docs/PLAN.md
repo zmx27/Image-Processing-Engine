@@ -30,6 +30,11 @@ run locally; phases marked `env: Mac` are pure local development with no GPU dep
 
 ## Phase 1 — Driver API + JIT spike · env: Colab
 
+**next:** code is written (`src/backend/cuda/{cuda_check,cuda_raii,nvrtc_compile}.h`,
+`tools/{invert_aot.cu,imgjit-spike.cpp}`) and the Mac CPU-only build is clean, but the boxes stay
+unchecked until a Colab run confirms both checkpoints. Run `colab/run.ipynb` top to bottom; the
+spike is registered with ctest, so the existing test cell covers it.
+
 Two checkpoints in one phase, so a failure is unambiguous about which layer broke:
 
 - [ ] **1a:** `cuInit` → `cuCtxCreate` → load a PTX blob produced by `nvcc --ptx` (ahead of time)
