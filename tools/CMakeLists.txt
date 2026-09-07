@@ -1,5 +1,16 @@
-# The Phase 1 spike needs an NVIDIA GPU, so it is Colab-only. On a Mac there is
-# nothing here to build — the portable core in src/ still configures and builds.
+# Phase 2 (docs/PLAN.md): file in, file out, over the portable core. Builds and runs
+# on a Mac with no CUDA toolkit present.
+add_executable(imgjit-cli imgjit-cli.cpp)
+target_link_libraries(imgjit-cli PRIVATE imgjit_cpu imgjit_io)
+
+# The Phase 2 gate: the example chain from the plan, end to end on a real PNG.
+add_test(
+  NAME phase2_cli_grayscale_sobel
+  COMMAND imgjit-cli --ops "grayscale,sobel"
+          "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
+          "${CMAKE_CURRENT_BINARY_DIR}/checkerboard_grayscale_sobel.png")
+
+# Everything below needs an NVIDIA GPU, so it is Colab-only.
 if(NOT IMGJIT_ENABLE_CUDA)
   return()
 endif()

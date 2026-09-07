@@ -60,13 +60,44 @@ whether the Colab workflow is tolerable (see `ARCHITECTURE.md` → Open risk). C
 
 ## Phase 2 — Portable core · env: Mac
 
-- [ ] `Image` type (`uint8`, 1/3/4 channels, row-major, explicit stride)
-- [ ] `OpChain` IR + parser for `"grayscale,gaussian:1.4,sobel,threshold:0.3"`
-- [ ] Canonicalizer + `KernelKey` hash — **excludes width/height** by construction
-- [ ] `IBackend` interface — see below; get the shape right here, not in Phase 6
-- [ ] CPU backend implementing the closed op set; stb load/save wrappers; `tools/imgjit-cli`
-- [ ] Tests: parser, canonicalizer, hash stability, each filter vs. checked-in fixtures
+**Done.** Clean `-Werror` build on macOS with no CUDA toolkit; 42 test cases green plus the
+`imgjit-cli` ctest case; invariant 1's grep silent over `src/` and `include/`.
+
+- [x] `Image` type (`uint8`, 1/3/4 channels, row-major, explicit stride)
+- [x] `OpChain` IR + parser for `"grayscale,gaussian:1.4,sobel,threshold:0.3"`
+- [x] Canonicalizer + `KernelKey` hash — **excludes width/height** by construction
+- [x] `IBackend` interface — see below; get the shape right here, not in Phase 6
+- [x] CPU backend implementing the closed op set; stb load/save wrappers; `tools/imgjit-cli`
+- [x] Tests: parser, canonicalizer, hash stability, each filter vs. checked-in fixtures
 - **Done when:** `imgjit-cli --ops "grayscale,sobel" in.png out.png` works on the Mac; tests green
+
+**Op semantics are binding on Phase 3's codegen and are defined once, in
+`include/imgjit/core/op_chain.h`.** The plan fixes *which* six ops exist; it does not fix their
+arithmetic, and a definitional difference between the generated kernel and the CPU oracle reads
+as a correctness bug rather than as the disagreement it is. Settled in Phase 2:
+
+- **Channel count is invariant across a chain** — `grayscale` writes luma into R, G and B rather
+  than reducing to one channel. A channel-changing op would make every fusion boundary in Phase 3
+  renegotiate the layout.
+- **Alpha (channel 3 of RGBA) passes through every op untouched.**
+- Float ops run on samples normalized to `[0,1]`, clamped and rounded back to `uint8` on store;
+  `invert` stays integer, which is why it alone compares exactly. Stencils use clamped (replicate)
+  edge addressing.
+- Parameter ranges, which are what bound the baked stencil: `gaussian` σ ∈ [0.1, 4.0] (default
+  1.0, radius = ⌈3σ⌉ ≤ 12), `threshold` ∈ [0,1] (default 0.5), `brightness` ∈ [-1,1] (default 0).
+- The Gaussian oracle is a **single 2D pass over the outer product** of the 1D weights, not two
+  separable passes — the generated kernel is one 2D stencil, and matching factorizations keeps
+  float reassociation out of the GPU-vs-CPU diff.
+
+Parameters are **quantized at parse time**, not only when hashing. Both collapse `gaussian:1.4`
+and `gaussian:1.4000001` onto one cache entry; quantizing early additionally makes the op that
+executes identical to the one the cached kernel baked, rather than merely colliding with it.
+
+Tests assert hand-computed values and definitional properties (a normalized blur leaves a constant
+image constant; a gradient operator is zero on one), plus an independently-written separable
+Gaussian as a cross-check. Deliberately **no golden output PNGs**: regenerated from the code under
+test, they prove only that behavior has not changed, and would have locked in a wrong luma
+coefficient as happily as a right one.
 
 **The op set is closed at six** — pointwise: `grayscale`, `invert`, `brightness`, `threshold`;
 stencil: `gaussian`, `sobel`. Adding ops is the #1 over-scoping risk named in `ARCHITECTURE.md`;
@@ -119,7 +150,21 @@ still passes with the pinned pool in place.
 forget, because omitting them produces a stale cache hit rather than a failure — a wrong benchmark
 number, not a crash: the **tile size** from Phase 7 (baked into `__shared__` array dimensions, so
 a naive|tiled boolean is not sufficient) and the **baked|parameterized constants mode** from
-Phase 8's A/B axis. Reserve both in the key now.
+Phase 8's A/B axis. Both are already reserved in the key as of Phase 2.
+
+**The authoritative field list** (`CLAUDE.md` invariant 4 points here; one copy, deliberately —
+`include/imgjit/core/kernel_key.h` implements exactly this and nothing else):
+
+| Field | Since | Why it is a codegen input |
+|---|---|---|
+| canonical `OpChain` (kinds + quantized params, in order) | 2 | the emitted stages, their fusion boundaries and every baked literal |
+| `channels` | 2 | baked as a literal; changes indexing and which channels the op touches |
+| `tile` (naive\|tiled) | 7 (reserved in 2) | a different kernel body |
+| `tile_size` | 7 (reserved in 2) | baked into the `__shared__` array dimensions |
+| `constants` (baked\|parameterized) | 8 (reserved in 2) | literals versus kernel parameters |
+
+**Not in the key, and never to be added: width and height.** They are launch arguments. This is
+enforced structurally — the struct has no such field and the hash takes nothing but the struct.
 
 **Invariant-2 exemption, scoped to this phase.** `CLAUDE.md` invariant 2 forbids `cuMemAlloc` in
 the per-frame path. Phase 3 is a one-image-at-a-time CLI with no pipeline to serialize, so
