@@ -1,0 +1,172 @@
+# Architecture
+
+## Vision
+
+A native server that receives image frames over TCP, dynamically generates and compiles CUDA
+kernels at runtime via NVRTC based on the requested filter chain, and executes them on the GPU
+via the CUDA Driver API with overlapped I/O. Three pillars: GPU driver-level control, runtime
+compilation, and high-throughput network I/O. This is a portfolio/demonstration project —
+architectural clarity and defensible benchmark numbers matter more than feature count.
+
+## Why JIT actually earns its place
+
+A JIT that only picks between kernels it could have precompiled is a gimmick. Two things make
+runtime compilation genuinely load-bearing here:
+
+**1. Filter-chain fusion.** A client requests a *chain*, e.g.
+`grayscale → gaussian(σ=1.4) → sobel → threshold(0.3)`. Executed conventionally that's 4 kernel
+launches and 4 round-trips through global memory. Codegen instead emits **one kernel per stencil
+stage**, inlining adjacent pointwise ops into registers around it. The number of possible chains
+is combinatorial in the op set, so ahead-of-time compilation of every permutation is exactly the
+binary bloat this design avoids. This is also why the wire protocol carries an op *chain*, not a
+single op code — a single op per frame would be a weak justification for JIT, since a handful of
+ops could just be precompiled.
+
+**2. Constant baking.** Filter radius, Gaussian weights, threshold, and channel count are emitted
+as compile-time literals, letting NVRTC fully unroll stencil loops and constant-fold. The
+alternative — passing them as kernel parameters — leaves dynamic bounds in the inner loop. This
+gives a clean A/B benchmark axis: same kernel, baked vs. parameterized.
+
+**Do not bake width/height.** They are launch-time kernel arguments. Baking them would make every
+new resolution a cache miss and a fresh ~100 ms compile, growing the cache unboundedly and
+defeating the memoization pillar. See `CLAUDE.md` invariant 4.
+
+## Component map
+
+```
+                  ┌──────────── Portable core (builds on macOS) ────────────┐
+  client(s) ──TCP─┤ acceptor thread → N connection threads                  │
+                  │        ├─ read_exact() framing, header validation       │
+                  │        ├─ claim pinned slot from free-list (blocking)   │
+                  │        └─ recv() payload DIRECTLY into pinned slot      │
+                  │                   ↓ push(FrameJob{slot, seq, chain})    │
+                  │           bounded MPSC queue (mutex + condvar)          │
+                  └────────────────────────┬───────────────────────────────-┘
+                                           ↓ pop
+                  ┌──── GPU worker thread — SOLE owner of CUcontext ────────┐
+                  │  in-flight table (depth = #streams)                     │
+                  │    KernelKey ← hash(canonical chain + baked consts      │
+                  │                     + channels + naive|tiled)           │
+                  │    KernelCache: hit → CUfunction | miss → NVRTC → PTX   │
+                  │                        → cuModuleLoadData               │
+                  │    cuMemcpyHtoDAsync → cuLaunchKernel → DtoHAsync       │
+                  │    cuEventRecord; poll events; retire ONLY on complete  │
+                  └────────────────────────┬───────────────────────────────-┘
+                                           ↓ retire
+                  response tagged with seq → echo to conn and/or stb_image_write
+                                           ↓
+                                  release pinned slot → free-list
+```
+
+The CPU backend implements the same `IBackend` interface as the CUDA backend, so the server is
+identical in both builds and the entire network path is testable on a Mac with no GPU at all.
+
+## The five load-bearing decisions
+
+**1. One thread owns the CUcontext, forever.** The GPU worker calls `cuCtxCreate` once at startup
+and never releases or migrates it. No other thread makes any CUDA call. This sidesteps the whole
+class of push/pop lifetime bugs and is auditable by grep (see `CLAUDE.md` invariant 1).
+
+**2. Pinned memory is a fixed pool allocated at startup, never per frame.** `cuMemAllocHost`
+requires a current context (so only the worker can allocate) and implicitly synchronizes (so
+per-frame allocation would serialize the pipeline it exists to parallelize). `N_SLOTS`
+fixed-size pinned buffers are allocated on the worker at init; connection threads take indices
+from a free-list and `recv()` straight into pinned memory — no staging copy on ingest.
+
+Deliberate consequences: fixed slots force a `MAX_FRAME_BYTES` cap (oversized frames are
+rejected before any allocation — never trust an attacker-controlled length), and **free-list
+exhaustion is the backpressure mechanism**. A connection thread blocks on slot claim, which stops
+it `recv()`ing, which fills the client's send buffer through TCP flow control. That's correct
+end-to-end behavior, not a limitation. Per-connection slot caps prevent one loud client starving
+the others.
+
+**3. Buffers return to the pool only after their `CUevent` is confirmed complete.** Not when the
+launch call returns, not when the async copy call returns. Reusing a slot early is a
+write-into-in-flight-DMA bug that corrupts data silently rather than crashing — the sharpest
+hazard in the design. It has a dedicated checksum stress test (Phase 6).
+
+**4. The worker keeps N frames in flight, not one.** The easiest place to accidentally destroy
+the project's point: a `pop → copy → launch → sync → respond` loop serializes everything and
+makes multiple streams worthless. The worker is a state machine — fill idle stream slots from the
+queue, record an event per slot, poll and retire each iteration.
+
+**5. Stencil ops are the fusion boundary.** Pointwise ops (grayscale, invert,
+brightness/contrast, threshold) fuse into registers at zero memory cost. Stencil ops (Gaussian,
+Sobel) need neighbors and terminate a stage. Codegen emits at most `#stencil_ops + 1` kernels,
+with pointwise runs folded into the adjacent stage's prologue/epilogue. Capping the op set at
+~6 keeps this honest.
+
+## Pitfalls to plan around
+
+- **TCP is a byte stream.** Short `recv()` is the #1 bug in hand-rolled protocol code. One
+  `read_exact()` helper, used everywhere.
+- **No struct-memcpy on the wire.** Padding and endianness make it non-portable. Pack field by
+  field (see `docs/PROTOCOL.md`).
+- **Async CUDA errors are sticky.** They often surface at the next sync point, not the failing
+  call, and an illegal-access error can poison the context permanently. Scope decision: tear down
+  and recreate the context (flushing the kernel cache and device pool with it), reject in-flight
+  work, resume. This is a deliberate, documented limitation, not an oversight.
+- **No CUDA Runtime API, anywhere.** Not `cudaMalloc`, not `<<<>>>`, and no Runtime-backed
+  dependency (Thrust/CUB) — they create an implicit primary context that conflicts with our
+  explicit one.
+- **Colab's network is sandboxed.** You cannot reach a Colab server from outside it. The GPU demo
+  is loopback *within the container*; genuine multi-machine testing happens against the CPU
+  backend instead. Stated plainly here rather than implied.
+- **stb is not part of the wire protocol.** Raw contiguous pixels go over the socket; stb is a
+  CLI/test-side file decode convenience only. The server never decodes PNG/JPEG from the network.
+- **NVRTC cold-start is ~50–200 ms.** Exactly why the cache exists; cold-vs-warm is a legitimate
+  benchmark line. Prewarm common chains at startup.
+- **Transport `uint8`, compute `float`.** Convert in-kernel, write back `uint8`. Halves PCIe
+  traffic versus float transport.
+- **Compare with tolerance, never bit-equality**, for stencil ops — FMA contraction and
+  reassociation make exactness the wrong bar. Use ≤1 LSB on `uint8` output, or PSNR > 50 dB.
+  Pointwise integer ops (e.g. inversion) are the exception and may be compared exactly.
+- **Scope discipline.** The two live over-scoping risks are adding filter ops and re-expanding
+  "distributed" beyond one node / one GPU / many client connections. Both are bounded by design;
+  hold the line.
+
+## Repository layout
+
+Built incrementally as phases need it, not scaffolded all at once.
+
+```
+image-processing/
+├── CLAUDE.md                 # build commands, conventions, architectural invariants
+├── CMakeLists.txt            # auto-detects CUDA → IMGJIT_ENABLE_CUDA
+├── README.md                 # what it is, results table, how to run
+├── colab/run.ipynb           # clones repo, installs deps, builds, runs tests + benchmarks
+├── docs/
+│   ├── PLAN.md               # phased roadmap
+│   ├── ARCHITECTURE.md       # this file
+│   └── PROTOCOL.md           # wire format spec
+├── include/imgjit/           # public headers, mirrors src/ layout
+├── src/
+│   ├── core/                 # Image, OpChain IR, parser, canonicalizer      (portable)
+│   ├── net/                  # framing, server, connection threads, client   (portable)
+│   ├── util/                 # queue, slot pool, logging, stb wrappers       (portable)
+│   ├── backend/cpu/          # scalar reference implementation               (portable)
+│   └── backend/cuda/         # driver-API context, NVRTC codegen, cache, RAII (CUDA only)
+├── kernels/                  # CUDA source templates consumed by the codegen
+├── tests/                    # unit + integration, with testdata/ fixtures
+├── bench/                    # benchmark harness and result CSVs
+├── tools/                    # imgjit-server, imgjit-client, imgjit-cli
+└── third_party/               # vendored stb_image, stb_image_write, Catch2
+```
+
+## Verification strategy
+
+- **Correctness:** the CPU backend is the oracle; every GPU path is diffed against it within
+  tolerance, per filter and per full chain.
+- **Cache:** assert via a compile counter that a repeated chain compiles once — including across
+  differing resolutions, which is the regression test for invariant 4.
+- **Concurrency:** TSan on the multi-client integration test, ASan across the suite.
+- **Memory safety:** a checksum stress test specifically targeting premature slot reuse
+  (invariant 3).
+- **Overlap:** Nsight Systems timeline must show real concurrency, not merely a better number.
+- **Performance:** every claim in this document maps to a row in the Phase 8 benchmark table.
+
+## Open risk
+
+Colab sessions are ephemeral and GPU allocation is not guaranteed. Phase 1 exists partly to find
+out early whether that workflow is tolerable. If it isn't, the fallback is a rented Linux GPU
+instance — which changes `colab/run.ipynb` and nothing about the architecture.
