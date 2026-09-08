@@ -1,0 +1,296 @@
+#include "backend/cuda/codegen.h"
+
+#include <array>
+#include <cstdio>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "backend/cuda/kernel_prelude.h"
+#include "imgjit/backend/cpu/ops.h"
+#include "imgjit/core/image.h"
+
+namespace imgjit::cuda {
+namespace {
+
+constexpr const char* kStagePrefix = "imgjit_stage";
+
+// %.9g is the shortest precision that round-trips every float exactly, so a literal
+// printed here parses back to the bit pattern the oracle computed. That matters most
+// for the gaussian weights: they are read straight out of the CPU implementation, and
+// a lossy print would make the two convolve with different numbers.
+std::string float_literal(float value) {
+  std::array<char, 32> text{};
+  std::snprintf(text.data(), text.size(), "%.9g", static_cast<double>(value));
+  std::string literal(text.data());
+  if (literal.find_first_of(".eE") == std::string::npos) {
+    literal += ".0";
+  }
+  return literal + "f";
+}
+
+// One kernel's worth of the chain: the stencil it is built around, plus the pointwise
+// runs folded in before and after it. A stage with no stencil is a pure pointwise
+// kernel, and only a chain containing no stencil at all produces one — "gaussian,
+// invert" folds the invert into the gaussian's epilogue rather than emitting a second
+// kernel for it.
+struct Stage {
+  std::vector<Op> prologue;  // applied at every stencil tap, before the stencil
+  bool has_stencil{false};
+  Op stencil{};
+  std::vector<Op> epilogue;  // applied once, to the stencil's result
+};
+
+std::vector<Stage> plan_stages(const OpChain& chain) {
+  std::vector<Stage> stages;
+  for (const Op& op : chain.ops) {
+    if (stages.empty()) {
+      stages.emplace_back();
+    }
+    if (!op_spec(op.kind).is_stencil) {
+      Stage& current = stages.back();
+      // Prefer attaching backwards: an epilogue runs once per output pixel, a
+      // prologue runs once per tap.
+      (current.has_stencil ? current.epilogue : current.prologue).push_back(op);
+      continue;
+    }
+    if (stages.back().has_stencil) {
+      stages.emplace_back();
+    }
+    stages.back().has_stencil = true;
+    stages.back().stencil = op;
+  }
+  return stages;
+}
+
+// Emits a pointwise run over the register array `var[0 .. colors)`.
+//
+// Every op ends in imgjit_quantize, without exception. See the comment on that helper
+// in kernel_prelude.h: the oracle stores a uint8 image between ops, so a fused kernel
+// that stayed in float would not be running the same filter. `invert` is written in
+// float here rather than as integer 255-u and still matches the oracle exactly — the
+// true result is an integer and the float error is ~1e-4, far inside the rounding.
+void emit_pointwise(std::ostringstream& out, const std::vector<Op>& ops, int colors,
+                    const char* var, const char* indent) {
+  for (const Op& op : ops) {
+    switch (op.kind) {
+      case OpKind::kGrayscale:
+        if (colors == 1) {
+          out << indent << "// grayscale: a 1-channel sample is already luminance.\n";
+          break;
+        }
+        out << indent << "{\n"
+            << indent << "  const float g = imgjit_quantize(imgjit_luma(" << var << "[0], " << var
+            << "[1], " << var << "[2]));\n";
+        for (int c = 0; c < colors; ++c) {
+          out << indent << "  " << var << "[" << c << "] = g;\n";
+        }
+        out << indent << "}\n";
+        break;
+      case OpKind::kInvert:
+        for (int c = 0; c < colors; ++c) {
+          out << indent << var << "[" << c << "] = imgjit_quantize(1.0f - " << var << "[" << c
+              << "]);\n";
+        }
+        break;
+      case OpKind::kBrightness:
+        for (int c = 0; c < colors; ++c) {
+          out << indent << var << "[" << c << "] = imgjit_quantize(" << var << "[" << c << "] + "
+              << float_literal(op.param) << ");\n";
+        }
+        break;
+      case OpKind::kThreshold:
+        for (int c = 0; c < colors; ++c) {
+          out << indent << var << "[" << c << "] = imgjit_quantize(" << var << "[" << c
+              << "] >= " << float_literal(op.param) << " ? 1.0f : 0.0f);\n";
+        }
+        break;
+      case OpKind::kGaussian:
+      case OpKind::kSobel:
+        throw std::logic_error("emit_pointwise: a stencil op reached a pointwise run");
+    }
+  }
+}
+
+std::string zero_initializer(int colors) {
+  std::string text = "{";
+  for (int c = 0; c < colors; ++c) {
+    text += (c == 0 ? "0.0f" : ", 0.0f");
+  }
+  return text + "}";
+}
+
+// The stage's neighbour accessor: one clamped (replicate) load with the prologue
+// folded in. Emitted only for stencil stages — it is the thing the stencil's tap loop
+// calls, and folding the prologue in here is what "pointwise ops fuse at zero memory
+// cost" means concretely.
+void emit_tap_function(std::ostringstream& out, const std::string& name, const Stage& stage,
+                       int channels, int colors) {
+  out << "\n__device__ __forceinline__ void " << name << "_tap(\n"
+      << "    const unsigned char* __restrict__ src, int x, int y, int width, int height,\n"
+      << "    float* v) {\n"
+      << "  const int sx = imgjit_clamp_coord(x, width);\n"
+      << "  const int sy = imgjit_clamp_coord(y, height);\n"
+      << "  const int i = (sy * width + sx) * " << channels << ";\n";
+  for (int c = 0; c < colors; ++c) {
+    out << "  v[" << c << "] = imgjit_load_sample(src[i + " << c << "]);\n";
+  }
+  emit_pointwise(out, stage.prologue, colors, "v", "  ");
+  out << "}\n";
+}
+
+// Baked stencil constants. Radius and weights are literals; width and height never
+// are (CLAUDE.md invariant 4). Returns the radius, which the kernel body needs.
+int emit_stencil_constants(std::ostringstream& out, const std::string& name, const Op& stencil) {
+  if (stencil.kind == OpKind::kSobel) {
+    out << "\n__device__ const float " << name
+        << "_gx[9] = {-1.0f, 0.0f, 1.0f, -2.0f, 0.0f, 2.0f, -1.0f, 0.0f, 1.0f};\n"
+        << "__device__ const float " << name
+        << "_gy[9] = {-1.0f, -2.0f, -1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 2.0f, 1.0f};\n";
+    return 1;
+  }
+
+  const int radius = cpu::gaussian_radius(stencil.param);
+  const std::vector<float> weights = cpu::gaussian_weights_1d(stencil.param);
+  // Read out of the CPU implementation rather than recomputed here, so the oracle and
+  // the kernel convolve with bit-identical numbers instead of two expf results that
+  // happen to agree.
+  out << "\n// gaussian sigma=" << float_literal(stencil.param) << ", radius=" << radius
+      << " — weights baked from imgjit::cpu::gaussian_weights_1d.\n"
+      << "__device__ const float " << name << "_w[" << weights.size() << "] = {";
+  for (std::size_t i = 0; i < weights.size(); ++i) {
+    out << (i == 0 ? "" : ", ") << float_literal(weights[i]);
+  }
+  out << "};\n";
+  return radius;
+}
+
+// The stencil body. Accumulation order matches the oracle exactly: dy outer, dx inner,
+// and the 2D weight formed as (wy * wx) before it multiplies the sample — the oracle's
+// `sum += wy * wx * sample` associates the same way. Only FMA contraction is left to
+// separate them, which is what the <=1 LSB tolerance is for.
+void emit_stencil_body(std::ostringstream& out, const std::string& name, const Op& stencil,
+                       int radius, int colors) {
+  const std::string radius_text = std::to_string(radius);
+
+  if (stencil.kind == OpKind::kGaussian) {
+    out << "  float acc[" << colors << "] = " << zero_initializer(colors) << ";\n"
+        << "  for (int dy = -" << radius_text << "; dy <= " << radius_text << "; ++dy) {\n"
+        << "    for (int dx = -" << radius_text << "; dx <= " << radius_text << "; ++dx) {\n"
+        << "      float t[" << colors << "];\n"
+        << "      " << name << "_tap(src, x + dx, y + dy, width, height, t);\n"
+        << "      const float w = " << name << "_w[dy + " << radius_text << "] * " << name
+        << "_w[dx + " << radius_text << "];\n";
+    for (int c = 0; c < colors; ++c) {
+      out << "      acc[" << c << "] += w * t[" << c << "];\n";
+    }
+    out << "    }\n  }\n";
+    for (int c = 0; c < colors; ++c) {
+      out << "  v[" << c << "] = imgjit_quantize(acc[" << c << "]);\n";
+    }
+    return;
+  }
+
+  out << "  float gx[" << colors << "] = " << zero_initializer(colors) << ";\n"
+      << "  float gy[" << colors << "] = " << zero_initializer(colors) << ";\n"
+      << "  for (int dy = -1; dy <= 1; ++dy) {\n"
+      << "    for (int dx = -1; dx <= 1; ++dx) {\n"
+      << "      float t[" << colors << "];\n"
+      << "      " << name << "_tap(src, x + dx, y + dy, width, height, t);\n"
+      << "      const int k = (dy + 1) * 3 + (dx + 1);\n";
+  for (int c = 0; c < colors; ++c) {
+    out << "      gx[" << c << "] += " << name << "_gx[k] * t[" << c << "];\n"
+        << "      gy[" << c << "] += " << name << "_gy[k] * t[" << c << "];\n";
+  }
+  out << "    }\n  }\n";
+  for (int c = 0; c < colors; ++c) {
+    out << "  v[" << c << "] = imgjit_quantize(sqrtf(gx[" << c << "] * gx[" << c << "] + gy[" << c
+        << "] * gy[" << c << "]));\n";
+  }
+}
+
+void emit_stage(std::ostringstream& out, const std::string& name, const Stage& stage, int channels,
+                int colors) {
+  int radius = 0;
+  if (stage.has_stencil) {
+    radius = emit_stencil_constants(out, name, stage.stencil);
+    emit_tap_function(out, name, stage, channels, colors);
+  }
+
+  // Every stage has the same signature, so the executor can ping-pong two buffers
+  // through the whole chain without knowing what any stage does. Dimensions are
+  // parameters here and nowhere else — that is CLAUDE.md invariant 4 made structural.
+  out << "\nextern \"C\" __global__ void " << name << "(\n"
+      << "    const unsigned char* __restrict__ src, unsigned char* __restrict__ dst,\n"
+      << "    int width, int height) {\n"
+      << "  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);\n"
+      << "  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);\n"
+      << "  if (x >= width || y >= height) { return; }\n"
+      << "  const int i = (y * width + x) * " << channels << ";\n"
+      << "  float v[" << colors << "];\n";
+
+  if (!stage.has_stencil) {
+    for (int c = 0; c < colors; ++c) {
+      out << "  v[" << c << "] = imgjit_load_sample(src[i + " << c << "]);\n";
+    }
+    emit_pointwise(out, stage.prologue, colors, "v", "  ");
+  } else {
+    emit_stencil_body(out, name, stage.stencil, radius, colors);
+  }
+
+  emit_pointwise(out, stage.epilogue, colors, "v", "  ");
+
+  for (int c = 0; c < colors; ++c) {
+    out << "  dst[i + " << c << "] = imgjit_store_sample(v[" << c << "]);\n";
+  }
+  if (channels == 4) {
+    // Read from the centre pixel of `src`, not from the stencil, so opacity is never
+    // blurred or inverted (imgjit/core/op_chain.h).
+    out << "  dst[i + 3] = src[i + 3];  // alpha passes through every op untouched\n";
+  }
+  out << "}\n";
+}
+
+}  // namespace
+
+GeneratedProgram emit_cuda_source(const KernelKey& key) {
+  if (!is_supported_channel_count(key.channels)) {
+    throw std::invalid_argument("emit_cuda_source: unsupported channel count " +
+                                std::to_string(key.channels));
+  }
+  if (key.tile != TileVariant::kNaive) {
+    throw std::invalid_argument("emit_cuda_source: the tiled variant arrives in Phase 7");
+  }
+  if (key.constants != ConstantsMode::kBaked) {
+    throw std::invalid_argument("emit_cuda_source: parameterized constants arrive in Phase 8");
+  }
+
+  const int colors = cpu::color_channels(key.channels);
+  const std::vector<Stage> stages = plan_stages(key.chain);
+
+  std::ostringstream out;
+  out << "// Generated by imgjit codegen (src/backend/cuda/codegen.cpp) — do not edit.\n"
+      << "// chain:    \"" << canonical_string(key.chain) << "\"\n"
+      << "// channels: " << key.channels << " (" << colors << " colour + "
+      << (key.channels == 4 ? 1 : 0) << " alpha)\n"
+      << "// stages:   " << stages.size() << "\n"
+      << "//\n"
+      << "// Width and height are absent from this source by construction: they are\n"
+      << "// launch arguments, so one compile serves every resolution (CLAUDE.md\n"
+      << "// invariant 4).\n"
+      << kKernelPrelude;
+
+  GeneratedProgram program;
+  program.stages.reserve(stages.size());
+  for (std::size_t i = 0; i < stages.size(); ++i) {
+    const std::string name = kStagePrefix + std::to_string(i);
+    emit_stage(out, name, stages[i], key.channels, colors);
+    program.stages.push_back({name, stages[i].has_stencil});
+  }
+
+  program.source = out.str();
+  return program;
+}
+
+}  // namespace imgjit::cuda
