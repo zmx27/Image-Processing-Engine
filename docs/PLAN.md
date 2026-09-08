@@ -132,13 +132,18 @@ still passes with the pinned pool in place.
 
 ## Phase 3 — Codegen + kernel cache · env: Colab
 
-**Written, not yet gated — next: run the notebook on Colab.** Every item below is implemented and
-the portable half is green on macOS (`imgjit_unit_codegen`, 13 cases). The three "Done when"
-clauses all need a GPU, so the phase stays open until `phase3_gpu_oracle_diff` and
-`phase3_gpu_kernel_cache` pass on Colab. As a stand-in, the generated source was compiled as host
-C++ with the CUDA-isms stubbed out and run against the oracle: all 17 corpus chains × {1,3,4}
-channels came out **bit-identical**. That proves the arithmetic and the fusion plan; it says
-nothing about NVRTC or the driver, which is exactly what the Colab run is for.
+**Done.** Verified on Colab (T4, driver reporting CUDA 12.8.93, `compute_75`): all 10 ctest cases
+passed, including both gate tests — `phase3_gpu_oracle_diff` (6.78s: every corpus chain × {1,3,4}
+channels within tolerance) and `phase3_gpu_kernel_cache` (1.71s: repeat-compiles and
+resolution-independence both hold). `imgjit-cli --backend cuda --repeat 5` on
+`grayscale,gaussian:1.4,sobel,threshold:0.3` showed run 1 at 73ms (cold NVRTC compile) and runs
+2-5 at ~0.3ms (warm cache hit) — a ~250x difference from memoization alone — with
+`NVRTC compiles: 1` confirming the cache held across all 5 runs.
+
+As a pre-Colab sanity check, the generated source was also compiled as host C++ with the
+CUDA-isms stubbed out and run against the oracle: all 17 corpus chains × {1,3,4} channels came
+out bit-identical. That caught arithmetic/fusion bugs before ever reaching Colab, but proved
+nothing about NVRTC or the driver — the real gate is the GPU run above.
 
 - [x] `emit_cuda_source(KernelKey) → GeneratedProgram`; one kernel per stencil stage, pointwise
       ops fused. Takes the *key*, not the chain: the key is by definition the complete set of
