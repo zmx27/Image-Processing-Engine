@@ -98,6 +98,17 @@ neighbors and terminate a stage. Codegen emits at most `#stencil_ops + 1` kernel
 runs folded into the adjacent stage's prologue/epilogue. The op set is **closed at these six**
 (see `docs/PLAN.md` Phase 2) — that cap is what keeps the fusion story honest.
 
+A pointwise run attaches *backwards* where it can — an epilogue runs once per output pixel, a
+prologue once per stencil tap — so only the first stage ever carries a prologue.
+
+**Fusion is a memory optimization and must not become a numerics change.** The CPU oracle
+materializes a `uint8` image between every pair of ops; a fused kernel keeps the value in a
+register, so codegen re-quantizes (`round(clamp(v,0,1)*255)/255`) at each fused boundary, rounding
+exactly where the oracle rounds. Skipping that is not a rounding nicety: Sobel's coefficients sum
+to 8 in absolute value, so a half-LSB difference per tap amplifies to ~4 LSB, and a `threshold`
+folded after a stencil flips 0↔255 for any sample that straddles it — both far outside the ≤1 LSB
+bar the GPU is held to. The cost is one `roundf` per boundary.
+
 **6. The worker never touches a socket, and slot release is never gated on a socket write.**
 Completions land in a per-connection outbox that a writer thread drains; the reader thread does
 framing and slot claim only. Two distinct failures make this structural rather than stylistic.

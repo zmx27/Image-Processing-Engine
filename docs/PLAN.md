@@ -42,7 +42,7 @@ Two checkpoints in one phase, so a failure is unambiguous about which layer brok
       just check the `.ptx` in as a fixture — **do not** enable the CUDA language in CMake to get
       it. `project(imgjit LANGUAGES CXX)` is deliberate: NVRTC compiles at runtime, so a CUDA
       toolchain in the build is unnecessary, and enabling it invites `<<<>>>` and cudart linkage
-      (invariant 8).
+      (invariant 8).image.pngimage.pngimage.pngimage.pngimage.pngimage.pngGo over every new file/edit that you made in this phase and walk me through on a high level what they do and their purpose. Assume that I am a complete beginner to cuda and image processing techniques.
 - [x] **1b:** swap the AOT blob for `nvrtcCompileProgram` at runtime. Proves JIT plumbing on top
       of already-working driver plumbing.
 - [x] `CU_CHECK` / `NVRTC_CHECK` macros; dump generated PTX to disk for inspection
@@ -132,19 +132,43 @@ still passes with the pinned pool in place.
 
 ## Phase 3 — Codegen + kernel cache · env: Colab
 
-- [ ] `emit_cuda_source(OpChain) → std::string`; one kernel per stencil stage, pointwise ops fused
-- [ ] `src/backend/cuda/kernel_prelude.h` — stable device helpers (clamp, luminance, `uint8`↔
+**Written, not yet gated — next: run the notebook on Colab.** Every item below is implemented and
+the portable half is green on macOS (`imgjit_unit_codegen`, 13 cases). The three "Done when"
+clauses all need a GPU, so the phase stays open until `phase3_gpu_oracle_diff` and
+`phase3_gpu_kernel_cache` pass on Colab. As a stand-in, the generated source was compiled as host
+C++ with the CUDA-isms stubbed out and run against the oracle: all 17 corpus chains × {1,3,4}
+channels came out **bit-identical**. That proves the arithmetic and the fusion plan; it says
+nothing about NVRTC or the driver, which is exactly what the Colab run is for.
+
+- [x] `emit_cuda_source(KernelKey) → GeneratedProgram`; one kernel per stencil stage, pointwise
+      ops fused. Takes the *key*, not the chain: the key is by definition the complete set of
+      codegen inputs, so anything else in the signature would be an input the cache is not keyed by
+- [x] `src/backend/cuda/kernel_prelude.h` — stable device helpers (clamp, luminance, `uint8`↔
       `float`, clamped indexing) as one raw-string literal; **no `kernels/` directory**, and the
       emitted source stays self-contained since NVRTC has no default include path
-- [ ] `--dump-source` flag alongside Phase 1's PTX dump — the generated kernel is what you read
-      when debugging, not the fragments
-- [ ] Bake radius / weights / threshold / channels as literals; dimensions stay launch arguments
-- [ ] `KernelCache: KernelKey → {CUmodule, CUfunction}` with a compile counter for assertions
-- [ ] Multi-stage execution with intermediate device buffers
-- [ ] Measure cold-compile vs. warm-hit latency
+- [x] `--dump-source` flag alongside Phase 1's PTX dump — the generated kernel is what you read
+      when debugging, not the fragments. Works on a Mac: codegen links no CUDA (see below)
+- [x] Bake radius / weights / threshold / channels as literals; dimensions stay launch arguments
+- [x] `KernelCache: KernelKey → {CUmodule, CUfunction}` with a compile counter for assertions
+- [x] Multi-stage execution with intermediate device buffers
+- [x] Measure cold-compile vs. warm-hit latency (`imgjit-cli --repeat n`)
 - **Done when:** every chain in the test corpus matches CPU within tolerance, **and** a repeated
       chain provably compiles exactly once (compile counter unchanged), **and** the same chain at
       three different resolutions still compiles only once
+
+**`src/backend/cuda/` builds as two targets, and only one of them needs a GPU.** `imgjit_codegen`
+emits CUDA *source text*, which takes no CUDA headers, so it is compiled and unit-tested on macOS;
+`imgjit_cuda` (context, cache, backend) is the half that calls the driver and stays behind
+`IMGJIT_ENABLE_CUDA`. Both live in this directory, so invariant 1's grep still skips them as one.
+The payoff is that a codegen typo is caught locally in seconds instead of one Colab round trip
+later, and the codegen tests assert the structure a GPU test would struggle to attribute: the
+fusion plan, which constants got baked, and that nothing resolution-dependent leaked into the
+source.
+
+**Fusion re-quantizes at every op boundary** — see `ARCHITECTURE.md` decision 5. The oracle stores
+a `uint8` image between ops, so the fused kernel rounds at the same points; otherwise Sobel
+amplifies the difference to ~4 LSB and a `threshold` after a stencil flips 0↔255, and the phase
+gate's tolerance would have to be loosened per-chain to hide it.
 
 **Every codegen input must be in `KernelKey`.** Two inputs arrive in later phases and are easy to
 forget, because omitting them produces a stale cache hit rather than a failure — a wrong benchmark

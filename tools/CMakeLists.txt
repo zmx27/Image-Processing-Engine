@@ -1,7 +1,8 @@
-# Phase 2 (docs/PLAN.md): file in, file out, over the portable core. Builds and runs
-# on a Mac with no CUDA toolkit present.
+# Phase 2/3 (docs/PLAN.md): file in, file out, over the real IBackend. Builds and runs
+# on a Mac with no CUDA toolkit present; imgjit_codegen is linked unconditionally so
+# `--dump-source` works there too.
 add_executable(imgjit-cli imgjit-cli.cpp)
-target_link_libraries(imgjit-cli PRIVATE imgjit_cpu imgjit_io)
+target_link_libraries(imgjit-cli PRIVATE imgjit_cpu imgjit_io imgjit_codegen)
 
 # The Phase 2 gate: the example chain from the plan, end to end on a real PNG.
 add_test(
@@ -14,6 +15,20 @@ add_test(
 if(NOT IMGJIT_ENABLE_CUDA)
   return()
 endif()
+
+target_link_libraries(imgjit-cli PRIVATE imgjit_cuda)
+target_compile_definitions(imgjit-cli PRIVATE IMGJIT_ENABLE_CUDA)
+
+# The Phase 3 gate's CLI half: the same chain on the GPU, dumping both the generated
+# source and the PTX, and repeating so the cold-compile / warm-hit split is visible in
+# the ctest log. Correctness against the CPU oracle is asserted by imgjit-gpu-tests.
+add_test(
+  NAME phase3_cli_cuda_grayscale_gaussian_sobel
+  COMMAND imgjit-cli --backend cuda --ops "grayscale,gaussian:1.4,sobel" --repeat 3
+          --dump-source "${CMAKE_CURRENT_BINARY_DIR}/phase3_chain.cu"
+          --dump-ptx "${CMAKE_CURRENT_BINARY_DIR}/phase3_chain.ptx"
+          "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
+          "${CMAKE_CURRENT_BINARY_DIR}/checkerboard_phase3.png")
 
 # Phase 1a: PTX produced ahead of time by nvcc, so the driver path can be proven
 # with JIT out of the picture. Deliberately an add_custom_command rather than
