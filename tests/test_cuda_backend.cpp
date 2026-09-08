@@ -1,0 +1,255 @@
+// Phase 3's gate (docs/PLAN.md), and Colab-only — every test here needs a real NVIDIA
+// GPU. Two independent claims, registered as two ctest cases so a failure names which:
+//
+//   [oracle]  every chain in the corpus matches the scalar CPU backend, which is
+//             CLAUDE.md invariant 9's whole purpose.
+//   [cache]   a repeated chain compiles exactly once, and the same chain at three
+//             resolutions still compiles once.
+//
+// The second is not a performance nicety. A codegen input missing from KernelKey
+// returns a STALE KERNEL rather than failing, so the only thing standing between this
+// project and a benchmark that quietly measures the wrong kernel is a counter that
+// someone asserts on.
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "backend/cuda/cuda_backend.h"
+#include "catch_amalgamated.hpp"
+#include "imgjit/backend/cpu/ops.h"
+#include "imgjit/core/image.h"
+#include "imgjit/core/op_chain.h"
+
+using imgjit::Image;
+using imgjit::OpChain;
+using imgjit::parse_op_chain;
+
+namespace {
+
+// Deterministic, so a failure is reproducible and a threshold that lands on a knife
+// edge does so identically on every run rather than flaking.
+Image make_image(int width, int height, int channels) {
+  Image image(width, height, channels);
+  std::uint32_t state = 0x9e3779b9U;
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+      for (int c = 0; c < channels; ++c) {
+        state = state * 1664525U + 1013904223U;
+        image.at(x, y, c) = static_cast<std::uint8_t>(state >> 24U);
+      }
+    }
+  }
+  return image;
+}
+
+OpChain chain_for(std::string_view text) {
+  const auto parsed = parse_op_chain(text);
+  REQUIRE(parsed.has_value());
+  return *parsed;
+}
+
+int max_abs_difference(const Image& lhs, const Image& rhs) {
+  REQUIRE(lhs.width() == rhs.width());
+  REQUIRE(lhs.height() == rhs.height());
+  REQUIRE(lhs.channels() == rhs.channels());
+  REQUIRE(lhs.byte_count() == rhs.byte_count());
+
+  int worst = 0;
+  for (std::size_t i = 0; i < lhs.byte_count(); ++i) {
+    const int difference = static_cast<int>(lhs.data()[i]) - static_cast<int>(rhs.data()[i]);
+    worst = std::max(worst, difference < 0 ? -difference : difference);
+  }
+  return worst;
+}
+
+// One backend, one context, one slot allocation — matching how the server will use it,
+// and how CLAUDE.md invariant 2 says slots are allocated: once, at startup.
+class Gpu {
+ public:
+  explicit Gpu(std::size_t max_slot_bytes)
+      : slot_(backend_.allocate_slots(1, max_slot_bytes)), max_bytes_(max_slot_bytes) {}
+
+  Image run(const Image& input, const OpChain& chain) {
+    REQUIRE(input.byte_count() <= max_bytes_);
+    std::memcpy(slot_, input.data(), input.byte_count());
+
+    imgjit::FrameJob job;
+    job.input = slot_;
+    job.width = input.width();
+    job.height = input.height();
+    job.channels = input.channels();
+    job.stride = input.stride();
+    job.chain = chain;
+
+    const imgjit::JobHandle handle = backend_.submit(job);
+    const std::vector<imgjit::Completion> completions = backend_.poll_completions();
+    REQUIRE(completions.size() == 1);
+    REQUIRE(completions.front().handle == handle);
+    INFO("backend error: " << completions.front().error);
+    REQUIRE(completions.front().status == imgjit::JobStatus::kOk);
+    return completions.front().output;
+  }
+
+  std::size_t compiles() const { return backend_.compile_count(); }
+
+ private:
+  imgjit::CudaBackend backend_;
+  std::byte* slot_;
+  std::size_t max_bytes_{0};
+};
+
+// The corpus the phase gate is "complete against" — which is only a meaningful phrase
+// because the op set is closed at six (docs/PLAN.md Phase 2). It covers each op alone,
+// both fusion directions, both stencils in one chain, and the interleaving that
+// exercises multi-stage execution with intermediate device buffers.
+constexpr std::string_view kCorpus[] = {
+    "",
+    "invert",
+    "grayscale",
+    "brightness:0.2",
+    "brightness:-0.35",
+    "threshold:0.4",
+    "gaussian:0.5",
+    "gaussian:1.4",
+    "gaussian:4",
+    "sobel",
+    "grayscale,sobel",
+    "sobel,invert",
+    "gaussian:1.4,sobel",
+    "grayscale,gaussian:1.4,sobel",
+    "invert,gaussian:1,invert,sobel,invert",
+    "grayscale,gaussian:1.4,sobel,threshold:0.3",
+    "grayscale,invert,brightness:0.1,threshold:0.6",
+};
+
+}  // namespace
+
+TEST_CASE("every chain in the corpus matches the CPU oracle", "[oracle]") {
+  // Odd dimensions on purpose: they leave a partial thread block on both axes, so the
+  // bounds check and the clamped (replicate) edge addressing are exercised rather than
+  // assumed.
+  constexpr int kWidth = 37;
+  constexpr int kHeight = 23;
+  Gpu gpu(static_cast<std::size_t>(kWidth) * kHeight * 4);
+
+  for (const int channels : {1, 3, 4}) {
+    const Image input = make_image(kWidth, kHeight, channels);
+    for (const std::string_view text : kCorpus) {
+      CAPTURE(text, channels);
+      const OpChain chain = chain_for(text);
+      const Image expected = imgjit::cpu::apply_chain(input, chain);
+      const Image actual = gpu.run(input, chain);
+
+      // <=1 LSB, never bit-equality: FMA contraction and reassociation happen on both
+      // sides (Apple Silicon contracts the oracle's own multiply-adds), so exactness is
+      // the wrong bar for anything with a float in it.
+      //
+      // Fusion does NOT widen this. The generated kernel re-quantizes at every op
+      // boundary, exactly where the oracle stores a uint8 image, so a fused chain and
+      // an unfused one round at the same points (src/backend/cuda/kernel_prelude.h).
+      //
+      // The one place this bound is fragile by nature is a threshold immediately after
+      // a stencil: it is a discontinuity, so a sub-ulp disagreement becomes a 255
+      // difference for a sample that lands on the knife edge. The inputs here are
+      // fixed and deterministic, so that is reproducible rather than flaky — if it
+      // ever trips, read it as a straddling pixel, not as a broken kernel.
+      CHECK(max_abs_difference(expected, actual) <= 1);
+    }
+  }
+}
+
+TEST_CASE("integer pointwise chains match the oracle exactly", "[oracle]") {
+  // docs/PLAN.md Phase 2: inversion is the one op with no float round trip in the
+  // oracle, so it is the one that may be compared exactly. The generated kernel writes
+  // it as 1.0f - v and still lands on the same byte — the true result is an integer and
+  // the float error is orders of magnitude below the rounding.
+  Gpu gpu(64 * 64 * 4);
+  for (const int channels : {1, 3, 4}) {
+    const Image input = make_image(64, 64, channels);
+    for (const std::string_view text : {"invert", "invert,invert"}) {
+      CAPTURE(text, channels);
+      const OpChain chain = chain_for(text);
+      CHECK(gpu.run(input, chain) == imgjit::cpu::apply_chain(input, chain));
+    }
+  }
+}
+
+TEST_CASE("a repeated chain compiles exactly once", "[cache]") {
+  Gpu gpu(64 * 64 * 3);
+  const Image input = make_image(64, 64, 3);
+  const OpChain chain = chain_for("grayscale,gaussian:1.4,sobel");
+
+  gpu.run(input, chain);
+  REQUIRE(gpu.compiles() == 1);
+  for (int i = 0; i < 4; ++i) {
+    gpu.run(input, chain);
+  }
+  CHECK(gpu.compiles() == 1);
+}
+
+TEST_CASE("resolution is not part of the kernel identity", "[cache]") {
+  // CLAUDE.md invariant 4, as a runtime assertion rather than a structural one. If
+  // width or height ever became a codegen input, this is where it would show: three
+  // compiles instead of one, and a cache that grows with every frame size a client
+  // happens to send.
+  Gpu gpu(256 * 256 * 3);
+  const OpChain chain = chain_for("gaussian:1.4,sobel");
+
+  gpu.run(make_image(64, 64, 3), chain);
+  gpu.run(make_image(128, 96, 3), chain);
+  gpu.run(make_image(256, 256, 3), chain);
+  CHECK(gpu.compiles() == 1);
+}
+
+TEST_CASE("the channel count is part of the kernel identity", "[cache]") {
+  // The converse of the test above, and the reason `channels` is in KernelKey: it is
+  // baked as a literal, so reusing an RGB kernel for RGBA would index the wrong bytes.
+  Gpu gpu(64 * 64 * 4);
+  const OpChain chain = chain_for("grayscale,sobel");
+
+  gpu.run(make_image(64, 64, 3), chain);
+  gpu.run(make_image(64, 64, 4), chain);
+  CHECK(gpu.compiles() == 2);
+}
+
+TEST_CASE("canonically equivalent spellings share one compile", "[cache]") {
+  // What quantizing at parse time buys: these are one cache entry and one kernel, not
+  // four near-identical compiles of the same stencil.
+  Gpu gpu(64 * 64 * 3);
+  const Image input = make_image(64, 64, 3);
+  for (const std::string_view text : {"gaussian:1.4", "gaussian:1.40", " gaussian : 1.4 ",
+                                      "gaussian:1.4000001"}) {
+    gpu.run(input, chain_for(text));
+  }
+  CHECK(gpu.compiles() == 1);
+}
+
+TEST_CASE("an empty chain never reaches the compiler", "[cache]") {
+  // An identity pass has no kernel to generate, so it is short-circuited rather than
+  // compiled as a copy.
+  Gpu gpu(64 * 64 * 3);
+  const Image input = make_image(64, 64, 3);
+  CHECK(gpu.run(input, chain_for("")) == input);
+  CHECK(gpu.compiles() == 0);
+}
+
+TEST_CASE("a malformed job is an error completion, not a throw", "[cache]") {
+  // docs/PROTOCOL.md status 6: the server stays alive. Checked here because the CUDA
+  // backend has failure modes the CPU one does not — an NVRTC error is a runtime event
+  // on a path the network layer will call.
+  imgjit::CudaBackend backend;
+  imgjit::FrameJob job;
+  job.input = nullptr;
+
+  const imgjit::JobHandle handle = backend.submit(job);
+  const std::vector<imgjit::Completion> completions = backend.poll_completions();
+  REQUIRE(completions.size() == 1);
+  CHECK(completions.front().handle == handle);
+  CHECK(completions.front().status == imgjit::JobStatus::kError);
+  CHECK_FALSE(completions.front().error.empty());
+}
