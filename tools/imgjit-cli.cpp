@@ -1,7 +1,7 @@
 // imgjit-cli — file in, file out, through the real IBackend.
 //
 //   imgjit-cli --ops "grayscale,sobel" in.png out.png
-//   imgjit-cli --ops "grayscale,gaussian:1.4,sobel" --backend cuda \
+//   imgjit-cli --ops "grayscale,gaussian:1.4,sobel" --backend cuda
 //              --dump-source chain.cu --repeat 5 in.png out.png
 //
 // It could just call cpu::apply_chain directly. It goes through allocate_slots /
