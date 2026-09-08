@@ -2,7 +2,10 @@
 # on a Mac with no CUDA toolkit present; imgjit_codegen is linked unconditionally so
 # `--dump-source` works there too.
 add_executable(imgjit-cli imgjit-cli.cpp)
-target_link_libraries(imgjit-cli PRIVATE imgjit_cpu imgjit_io imgjit_codegen)
+# imgjit_cpu is not listed here: imgjit_codegen already links it PUBLIC (codegen.h
+# includes imgjit/core/kernel_key.h), so listing it again just relinks the same
+# archive twice.
+target_link_libraries(imgjit-cli PRIVATE imgjit_io imgjit_codegen)
 
 # The Phase 2 gate: the example chain from the plan, end to end on a real PNG.
 add_test(

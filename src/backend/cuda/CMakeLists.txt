@@ -11,9 +11,12 @@
 #                    so it exists only when a toolkit was found.
 add_library(imgjit_codegen STATIC codegen.cpp)
 target_include_directories(imgjit_codegen PUBLIC "${CMAKE_SOURCE_DIR}/src")
-# Not decoration: codegen bakes gaussian weights straight out of the CPU oracle so the
-# two convolve with bit-identical numbers rather than two expf results that agree.
-target_link_libraries(imgjit_codegen PRIVATE imgjit_cpu)
+# PUBLIC, not PRIVATE: codegen.h itself #includes imgjit/core/kernel_key.h, so anything
+# that links imgjit_codegen (imgjit_cuda, imgjit-cli, the tests) needs imgjit_cpu's
+# public include path transitively, not just codegen.cpp's own translation unit.
+# Also not decoration: codegen bakes gaussian weights straight out of the CPU oracle so
+# the two convolve with bit-identical numbers rather than two expf results that agree.
+target_link_libraries(imgjit_codegen PUBLIC imgjit_cpu)
 
 if(NOT IMGJIT_ENABLE_CUDA)
   return()

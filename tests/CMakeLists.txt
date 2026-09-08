@@ -14,7 +14,7 @@ add_executable(imgjit-tests
   test_image_io.cpp
   test_kernel_key.cpp
   test_op_chain.cpp)
-target_link_libraries(imgjit-tests PRIVATE catch2 imgjit_cpu imgjit_io imgjit_codegen)
+target_link_libraries(imgjit-tests PRIVATE catch2 imgjit_io imgjit_codegen)
 target_compile_definitions(imgjit-tests PRIVATE
   IMGJIT_TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata"
   IMGJIT_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
@@ -35,9 +35,10 @@ endif()
 # CPU oracle, plus the compile-counter assertions that make "compiles exactly once"
 # a claim rather than a hope.
 add_executable(imgjit-gpu-tests test_cuda_backend.cpp)
-# imgjit_cpu is named explicitly, not inherited: this binary diffs against the oracle,
-# so it includes cpu/ops.h directly, and imgjit_codegen links that target privately.
-target_link_libraries(imgjit-gpu-tests PRIVATE catch2 imgjit_cuda imgjit_cpu)
+# imgjit_cpu is not listed here: imgjit_cuda -> imgjit_codegen -> imgjit_cpu is all
+# PUBLIC, so cpu/ops.h (used directly for the oracle diff) is already on the include
+# path and imgjit_cpu is already in the link.
+target_link_libraries(imgjit-gpu-tests PRIVATE catch2 imgjit_cuda)
 
 add_test(NAME phase3_gpu_oracle_diff COMMAND imgjit-gpu-tests "[oracle]")
 add_test(NAME phase3_gpu_kernel_cache COMMAND imgjit-gpu-tests "[cache]")
