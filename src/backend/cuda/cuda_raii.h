@@ -123,4 +123,47 @@ class DeviceBuffer {
   std::size_t size_{};
 };
 
+// Page-locked host memory, allocated once at worker startup to back the frame slots
+// (CLAUDE.md invariant 2 — the allocation implicitly synchronizes, so it must never
+// happen per frame). Hands out std::byte* so IBackend::allocate_slots can return it
+// without leaking a driver type past this directory.
+class PinnedHostBuffer {
+ public:
+  explicit PinnedHostBuffer(std::size_t bytes) : size_(bytes) {
+    CU_CHECK(cuMemAllocHost(&pointer_, bytes));
+  }
+
+  ~PinnedHostBuffer() { reset(); }
+
+  PinnedHostBuffer(PinnedHostBuffer&& other) noexcept
+      : pointer_(std::exchange(other.pointer_, nullptr)), size_(std::exchange(other.size_, 0)) {}
+
+  PinnedHostBuffer& operator=(PinnedHostBuffer&& other) noexcept {
+    if (this != &other) {
+      reset();
+      pointer_ = std::exchange(other.pointer_, nullptr);
+      size_ = std::exchange(other.size_, 0);
+    }
+    return *this;
+  }
+
+  PinnedHostBuffer(const PinnedHostBuffer&) = delete;
+  PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
+
+  std::byte* data() const { return static_cast<std::byte*>(pointer_); }
+  std::size_t size() const { return size_; }
+
+ private:
+  void reset() noexcept {
+    if (pointer_ != nullptr) {
+      CU_CHECK_NOTHROW(cuMemFreeHost(pointer_));
+      pointer_ = nullptr;
+      size_ = 0;
+    }
+  }
+
+  void* pointer_{nullptr};
+  std::size_t size_{};
+};
+
 }  // namespace imgjit::cuda
