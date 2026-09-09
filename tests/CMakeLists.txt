@@ -13,15 +13,22 @@ add_executable(imgjit-tests
   test_cpu_ops.cpp
   test_image_io.cpp
   test_kernel_key.cpp
-  test_op_chain.cpp)
-target_link_libraries(imgjit-tests PRIVATE catch2 imgjit_io imgjit_codegen)
+  test_op_chain.cpp
+  test_protocol.cpp
+  test_server.cpp
+  test_slot_pool.cpp)
+# imgjit_io is not listed: imgjit_net already pulls it in for the server's flags-bit-1
+# write path, and naming the same archive twice is a duplicate-library link warning.
+target_link_libraries(imgjit-tests PRIVATE catch2 imgjit_codegen imgjit_net)
 target_compile_definitions(imgjit-tests PRIVATE
   IMGJIT_TESTDATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/testdata"
   IMGJIT_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 # Registered per Catch2 tag rather than as one opaque target, so a ctest failure names
-# the layer that broke.
-foreach(tag core cpu io codegen)
+# the layer that broke. [net] is the codec and the concurrency primitives, which are
+# pure functions and threads with no sockets; [server] is the end-to-end suite, and it
+# is the one that has to be clean under BOTH sanitizer builds (docs/PLAN.md Phase 4).
+foreach(tag core cpu io codegen net server)
   add_test(NAME imgjit_unit_${tag} COMMAND imgjit-tests "[${tag}]")
 endforeach()
 
