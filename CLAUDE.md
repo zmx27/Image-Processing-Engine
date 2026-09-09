@@ -13,6 +13,14 @@ Local (macOS — CPU backend only; **no Mac has an NVIDIA GPU**, Intel or Apple 
     cmake --build build -j
     ctest --test-dir build --output-on-failure
 
+Sanitizers are **two separate build trees** — ASan and TSan cannot be linked into one binary, so
+the Phase 4 gate is the same test set run twice:
+
+    cmake -B build-asan -DIMGJIT_SANITIZER=address && cmake --build build-asan -j
+    ctest --test-dir build-asan --output-on-failure
+    cmake -B build-tsan -DIMGJIT_SANITIZER=thread  && cmake --build build-tsan -j
+    ctest --test-dir build-tsan --output-on-failure
+
 Colab (CUDA auto-detected via `find_package(CUDAToolkit)`): see `colab/run.ipynb`.
 
 Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.

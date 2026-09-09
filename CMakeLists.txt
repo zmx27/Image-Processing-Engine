@@ -13,6 +13,31 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   add_compile_options(-Wall -Wextra -Werror)
 endif()
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
+# ASan and TSan are TWO BUILD CONFIGURATIONS, NOT ONE (docs/PLAN.md Phase 4): they
+# cannot be linked into the same binary, so the Phase 4 gate is two build trees over the
+# same test set rather than one instrumented build.
+#
+#   cmake -B build-asan -DIMGJIT_SANITIZER=address && cmake --build build-asan -j
+#   ctest --test-dir build-asan --output-on-failure
+#   cmake -B build-tsan -DIMGJIT_SANITIZER=thread  && cmake --build build-tsan -j
+#   ctest --test-dir build-tsan --output-on-failure
+set(IMGJIT_SANITIZER "off" CACHE STRING "Sanitizer to build with: off, address, or thread")
+set_property(CACHE IMGJIT_SANITIZER PROPERTY STRINGS off address thread)
+if(IMGJIT_SANITIZER STREQUAL "address")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=address)
+  message(STATUS "imgjit: AddressSanitizer build")
+elseif(IMGJIT_SANITIZER STREQUAL "thread")
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=thread)
+  message(STATUS "imgjit: ThreadSanitizer build")
+elseif(NOT IMGJIT_SANITIZER STREQUAL "off")
+  message(FATAL_ERROR "IMGJIT_SANITIZER must be one of: off, address, thread")
+endif()
+
 # No Mac has an NVIDIA GPU (Intel or Apple Silicon) — CUDA is only ever found on
 # Colab/Linux. This must stay optional so the portable core builds on macOS with
 # no CUDA toolkit present at all. See CLAUDE.md and docs/ARCHITECTURE.md.

@@ -14,6 +14,26 @@ add_test(
           "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
           "${CMAKE_CURRENT_BINARY_DIR}/checkerboard_grayscale_sobel.png")
 
+# Phase 4 (docs/PLAN.md, Track N): the server and the reference client. Both are
+# portable — the whole network layer is proven against the CPU backend on a Mac, so a
+# bug found here is never confused with a CUDA bug. Phase 5 changes one line in
+# imgjit-server.cpp (the backend the factory returns) and nothing else.
+add_executable(imgjit-server imgjit-server.cpp)
+target_link_libraries(imgjit-server PRIVATE imgjit_net imgjit_cpu)
+
+add_executable(imgjit-client imgjit-client.cpp)
+target_link_libraries(imgjit-client PRIVATE imgjit_net imgjit_io)
+
+# The tools' own gate: ephemeral port handshake, a pipelining client asking for both
+# result paths, clean shutdown on SIGINT. Correctness against the oracle and every
+# malformed-frame case are asserted by imgjit-tests [server].
+add_test(
+  NAME phase4_server_client_smoke
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/phase4_smoke.sh"
+          "$<TARGET_FILE:imgjit-server>" "$<TARGET_FILE:imgjit-client>"
+          "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
+          "${CMAKE_CURRENT_BINARY_DIR}/phase4_smoke")
+
 # Everything below needs an NVIDIA GPU, so it is Colab-only.
 if(NOT IMGJIT_ENABLE_CUDA)
   return()

@@ -203,22 +203,39 @@ exemption, not an oversight — do not "fix" it early, and do not let it leak in
 
 ## Phase 4 — Network layer · env: Mac (CPU backend)
 
-- [ ] `docs/PROTOCOL.md` implemented as pure encode/decode functions
-- [ ] `read_exact()` / `write_exact()`; explicit little-endian pack/unpack; header validation +
+**Done.** Clean `-Werror` build on macOS with no CUDA toolkit; 8 ctest cases green in all three
+configurations — plain, `-DIMGJIT_SANITIZER=address` and `-DIMGJIT_SANITIZER=thread` — with the
+`[server]` suite additionally run 20× under each sanitizer to shake out flakiness. Invariant 1's
+grep is silent over `src/` and `include/`.
+
+- [x] `docs/PROTOCOL.md` implemented as pure encode/decode functions
+- [x] `read_exact()` / `write_exact()`; explicit little-endian pack/unpack; header validation +
       error responses
-- [ ] Codec unit tests including malformed input: bad magic, truncated header, length mismatch,
+- [x] Codec unit tests including malformed input: bad magic, truncated header, length mismatch,
       oversized payload
-- [ ] Validation order + per-error-code connection disposition (drain vs. close) per
+- [x] Validation order + per-error-code connection disposition (drain vs. close) per
       `docs/PROTOCOL.md`; desync test: an error frame followed by a valid frame on the same
       connection must still be served correctly
-- [ ] `tools/imgjit-server`; acceptor + **reader and writer thread per connection**; bounded MPSC
+- [x] `tools/imgjit-server`; acceptor + **reader and writer thread per connection**; bounded MPSC
       queue; per-connection outbox; slot pool with per-connection caps
-- [ ] `tools/imgjit-client`; both result paths (echo, server-side write); blocking backpressure
+- [x] `tools/imgjit-client`; both result paths (echo, server-side write); blocking backpressure
       verified with an artificially throttled worker
-- [ ] Pipelining test: client sends N frames before reading any response — the case that deadlocks
+- [x] Pipelining test: client sends N frames before reading any response — the case that deadlocks
       if slot release is gated on the socket write
-- [ ] Integration test: N clients × M frames, verified against the CPU oracle
+- [x] Integration test: N clients × M frames, verified against the CPU oracle
 - **Done when:** multi-client localhost run is correct and clean under **ASan and TSan**
+
+**Two drain-accounting paths, not one.** An error can be detected before or after the chain bytes
+have been read, and the number of bytes still outstanding differs between them: a chain rejected
+from the *header* (`chain_len` over the cap) leaves chain **and** payload on the wire, while a
+chain that was read and then failed to *parse* leaves only the payload. Both are status 4 and both
+drain, so a single wrong subtraction is invisible until the next frame decodes from the middle of
+this one. `tests/test_server.cpp` covers each separately.
+
+**Backpressure is asserted on a counter, not a stopwatch.** `SlotPool::blocked_claims()` and the
+queue's high-water mark are exposed through `Server` so the tests can prove the reader actually
+parked, rather than timing a run and hoping. The pipelining test asserts it too: 8 frames through
+2 slots must block, which is exactly the state release-after-write would deadlock in.
 
 **The slot pool owns indices, not storage.** Phase 5 replaces its backing memory with pinned
 buffers that `cuMemAllocHost` must allocate *on the worker thread at startup* — a change of

@@ -1,3 +1,6 @@
 build/
+# ASan and TSan cannot share a binary, so the Phase 4 gate is two extra build trees.
+build-asan/
+build-tsan/
 compile_commands.json
 .DS_Store
