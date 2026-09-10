@@ -38,9 +38,11 @@ Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.
 2. **Pools, not per-frame allocation.** Pinned and device buffers come from pools allocated once
    at worker startup. Never `cuMemAllocHost`/`cuMemAlloc` in the per-frame path — both require a
    current context and the pinned call implicitly synchronizes, serializing the pipeline.
-   One documented exemption: the Phase 3 file-in/file-out CLI has no pipeline to serialize and
-   may allocate intermediate device buffers per invocation (see `docs/PLAN.md` Phase 3). The
-   exemption ends at Phase 5 — do not let it leak into the server path.
+   The one documented exemption — the Phase 3 file-in/file-out CLI, which has no pipeline to
+   serialize — **is closed as of Phase 5**: `CudaBackend` has no allocating path in `submit()` at
+   all, and a frame with no device buffer to run in is an error rather than a quiet
+   `cuMemAlloc`. Device buffers are sized to the slot size at `allocate_slots()` time, which is
+   why the check can never fire through the server (validation caps every payload at that size).
 3. **Event-gated buffer return.** A buffer returns to its pool only after its `CUevent` is
    confirmed complete — never on return of the async copy or launch that used it. This is the
    most important invariant in the codebase: violating it silently corrupts data instead of

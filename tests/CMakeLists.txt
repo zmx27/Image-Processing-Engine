@@ -38,14 +38,21 @@ endif()
 
 # A SEPARATE binary, not another tag on imgjit-tests: the portable suite must keep
 # building and running on a machine with no toolkit, and linking the driver into it
-# would end that. This one is the Phase 3 gate — every chain in the corpus against the
-# CPU oracle, plus the compile-counter assertions that make "compiles exactly once"
-# a claim rather than a hope.
-add_executable(imgjit-gpu-tests test_cuda_backend.cpp)
+# would end that. This one carries the Phase 3 gate — every chain in the corpus against
+# the CPU oracle, plus the compile-counter assertions that make "compiles exactly once"
+# a claim rather than a hope — and the Phase 5 gate, which is the same oracle diff with
+# the whole server and several concurrent connections in between.
+add_executable(imgjit-gpu-tests
+  test_cuda_backend.cpp
+  test_gpu_server.cpp)
 # imgjit_cpu is not listed here: imgjit_cuda -> imgjit_codegen -> imgjit_cpu is all
 # PUBLIC, so cpu/ops.h (used directly for the oracle diff) is already on the include
-# path and imgjit_cpu is already in the link.
-target_link_libraries(imgjit-gpu-tests PRIVATE catch2 imgjit_cuda)
+# path and imgjit_cpu is already in the link. imgjit_net IS listed: Phase 5 puts the
+# real server in the test, and the network layer links no CUDA in either build.
+target_link_libraries(imgjit-gpu-tests PRIVATE catch2 imgjit_cuda imgjit_net)
+target_compile_definitions(imgjit-gpu-tests PRIVATE
+  IMGJIT_TEST_TMP_DIR="${CMAKE_CURRENT_BINARY_DIR}")
 
 add_test(NAME phase3_gpu_oracle_diff COMMAND imgjit-gpu-tests "[oracle]")
 add_test(NAME phase3_gpu_kernel_cache COMMAND imgjit-gpu-tests "[cache]")
+add_test(NAME phase5_gpu_server COMMAND imgjit-gpu-tests "[gpu-server]")

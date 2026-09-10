@@ -195,11 +195,12 @@ Phase 8's A/B axis. Both are already reserved in the key as of Phase 2.
 **Not in the key, and never to be added: width and height.** They are launch arguments. This is
 enforced structurally — the struct has no such field and the hash takes nothing but the struct.
 
-**Invariant-2 exemption, scoped to this phase.** `CLAUDE.md` invariant 2 forbids `cuMemAlloc` in
-the per-frame path. Phase 3 is a one-image-at-a-time CLI with no pipeline to serialize, so
-allocating intermediate device buffers per invocation is acceptable *here only*. The device pool
-arrives in Phase 6 and the invariant applies unconditionally from that point. This is a stated
-exemption, not an oversight — do not "fix" it early, and do not let it leak into Phase 5.
+**Invariant-2 exemption, scoped to this phase — and since closed.** `CLAUDE.md` invariant 2 forbids
+`cuMemAlloc` in the per-frame path. Phase 3 is a one-image-at-a-time CLI with no pipeline to
+serialize, so allocating intermediate device buffers per invocation was acceptable *here only*.
+Phase 5 closed it: `allocate_slots()` now allocates the device ping-pong pair alongside the pinned
+slots, and `submit()` has no allocating path left. It cost nothing, because `imgjit-cli` allocates
+a slot sized to its one image and so was already taking the pooled path.
 
 ## Phase 4 — Network layer · env: Mac (CPU backend)
 
@@ -268,15 +269,45 @@ binary; the gate is two ctest presets over the same test set.
 
 ## Phase 5 — Integration: GPU worker behind the server · env: Colab
 
-- [ ] Swap the CPU worker for the GPU worker; `cuCtxCreate` once at startup on that thread
-- [ ] Pinned slot pool allocated on the worker; connection threads `recv()` directly into slots
-- [ ] **Single stream only** — isolate "is the plumbing correct" from async overlap
-- [ ] Startup prewarm of a configured chain list — `ARCHITECTURE.md` claims it, and Phase 8's
-      gate requires every such claim to map to a measured row
-- [ ] Minimal timing harness (FPS, p50/p99 round-trip) and a **recorded baseline** committed to
-      the repo
+**Implemented; awaiting the Colab gate run.** Everything below is written and everything that can
+be verified without a GPU has been: clean `-Werror` build on macOS, all 8 local ctest cases green
+in plain / ASan / TSan trees, invariant 1's grep silent, and the CUDA-only translation units
+typechecked against stub driver headers so a syntax error is not what a Colab round trip
+discovers. What is genuinely outstanding is the part that needs an NVIDIA GPU — see
+"Still to run", below.
+
+- [x] Swap the CPU worker for the GPU worker; `cuCtxCreate` once at startup on that thread
+      (`imgjit-server --backend cuda`; the factory already ran on the worker thread, so this
+      changed only which backend it returns)
+- [x] Pinned slot pool allocated on the worker; connection threads `recv()` directly into slots.
+      The pool half was already right from Phase 4 — what Phase 5 had to fix was the *other* end:
+      `submit()` was copying the pinned slot into a pageable `Image` before the H2D, which quietly
+      undid the whole point of the pool. The transfer now goes straight from the slot.
+- [x] **Single stream only** — isolate "is the plumbing correct" from async overlap. An explicit
+      `CudaStream` (RAII, `CU_STREAM_NON_BLOCKING`), async H2D → launches → D2H, one
+      `cuStreamSynchronize`. Phase 6 makes it K of them and adds the events.
+- [x] Startup prewarm of a configured chain list — `imgjit-server --prewarm "<chain>[@channels]"`,
+      repeatable, executed inside the backend factory (the one place that is both on the worker
+      thread and before `start()` returns). The channel suffix is not decoration: `channels` is
+      baked into the kernel, so a chain is warmed for one channel count at a time.
+- [x] Minimal timing harness (FPS, p50/p99 round-trip) — `bench/imgjit-bench`, closed-loop with a
+      per-connection window, latency matched per `seq_num` off the client's pending map
+- [ ] **Recorded baseline** committed to the repo — `bench/baseline_phase5.csv` holds the schema;
+      the rows come from the Colab cells (see `bench/README.md`)
 - **Done when:** concurrent loopback clients with differing chains all match the CPU oracle on
       Colab; TSan clean; no CUDA symbol reachable outside `src/backend/cuda/`
+
+**Still to run, on Colab:** `ctest` for `phase5_gpu_server` (six concurrent connections, differing
+chains at differing channel counts, every response diffed against the CPU oracle), then the two
+notebook cells that append `phase5_cuda_cold` and `phase5_cuda_prewarmed` to
+`bench/baseline_phase5.csv`. Expect the two rows to differ in `cold_first_ms` and essentially
+nowhere else — that difference is `ARCHITECTURE.md`'s prewarm claim becoming a measurement.
+
+**TSan over the CUDA build is worth attempting but not worth contorting for.** The portable
+threading is already TSan-clean on the Mac, which is the part this project wrote; the driver
+brings its own threads and TSan has no interceptors for them, so a report inside `libcuda` is a
+tooling limitation rather than a finding. If that happens, record it here and keep the Mac TSan
+run as the gate for our own code rather than suppressing driver frames into a false green.
 
 Phases 6 and 7 are both gated on being "measurably faster" — which requires a number recorded
 *here*, with the harness that produced it. `bench/` in Phase 8 then widens the matrix rather than
