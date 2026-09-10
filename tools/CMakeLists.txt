@@ -16,8 +16,8 @@ add_test(
 
 # Phase 4 (docs/PLAN.md, Track N): the server and the reference client. Both are
 # portable — the whole network layer is proven against the CPU backend on a Mac, so a
-# bug found here is never confused with a CUDA bug. Phase 5 changes one line in
-# imgjit-server.cpp (the backend the factory returns) and nothing else.
+# bug found here is never confused with a CUDA bug. Phase 5 adds `--backend cuda`,
+# which changes only which backend the factory returns.
 add_executable(imgjit-server imgjit-server.cpp)
 target_link_libraries(imgjit-server PRIVATE imgjit_net imgjit_cpu)
 
@@ -41,6 +41,12 @@ endif()
 
 target_link_libraries(imgjit-cli PRIVATE imgjit_cuda)
 target_compile_definitions(imgjit-cli PRIVATE IMGJIT_ENABLE_CUDA)
+
+# Phase 5: the same swap for the server. imgjit_net stays where it is — the network
+# layer links no CUDA in either build, which is what keeps invariant 1's grep silent
+# over src/net/.
+target_link_libraries(imgjit-server PRIVATE imgjit_cuda)
+target_compile_definitions(imgjit-server PRIVATE IMGJIT_ENABLE_CUDA)
 
 # The Phase 3 gate's CLI half: the same chain on the GPU, dumping both the generated
 # source and the PTX, and repeating so the cold-compile / warm-hit split is visible in
