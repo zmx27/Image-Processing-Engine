@@ -269,12 +269,17 @@ binary; the gate is two ctest presets over the same test set.
 
 ## Phase 5 — Integration: GPU worker behind the server · env: Colab
 
-**Implemented; awaiting the Colab gate run.** Everything below is written and everything that can
-be verified without a GPU has been: clean `-Werror` build on macOS, all 8 local ctest cases green
-in plain / ASan / TSan trees, invariant 1's grep silent, and the CUDA-only translation units
-typechecked against stub driver headers so a syntax error is not what a Colab round trip
-discovers. What is genuinely outstanding is the part that needs an NVIDIA GPU — see
-"Still to run", below.
+**Done.** Verified on Colab (T4, `compute_75`): all 14 ctest cases passed, including the gate —
+`phase5_gpu_server` (0.99s: six concurrent connections, differing chains at differing channel
+counts, every response diffed against the scalar CPU backend within 1 LSB). Locally: clean
+`-Werror` build on macOS, all 8 portable ctest cases green in plain / ASan / TSan trees,
+invariant 1's grep silent over `src/` and `include/`.
+
+The baseline is `bench/baseline_phase5.csv`. At 1024²×3, 4 connections, one stream, synchronous:
+~270 fps, p50 27 ms round trip. Prewarm's effect is exactly where the harness was built to show
+it — first-frame latency 114 ms cold vs 41 ms prewarmed (the ~73 ms is the NVRTC compile, moved
+to startup), with p50/p99/fps unchanged because prewarm only touches each connection's first
+frame. That 270 fps / 27 ms is the number Phases 6 and 7 are measured against.
 
 - [x] Swap the CPU worker for the GPU worker; `cuCtxCreate` once at startup on that thread
       (`imgjit-server --backend cuda`; the factory already ran on the worker thread, so this
@@ -292,22 +297,17 @@ discovers. What is genuinely outstanding is the part that needs an NVIDIA GPU �
       baked into the kernel, so a chain is warmed for one channel count at a time.
 - [x] Minimal timing harness (FPS, p50/p99 round-trip) — `bench/imgjit-bench`, closed-loop with a
       per-connection window, latency matched per `seq_num` off the client's pending map
-- [ ] **Recorded baseline** committed to the repo — `bench/baseline_phase5.csv` holds the schema;
-      the rows come from the Colab cells (see `bench/README.md`)
+- [x] **Recorded baseline** committed to the repo — `bench/baseline_phase5.csv`, three rows
+      (`phase5_cuda_cold`, `phase5_cuda_prewarmed` from Colab; `phase5_cpu_mac` as the harness
+      canary that reproduces on a Mac). See `bench/README.md`.
 - **Done when:** concurrent loopback clients with differing chains all match the CPU oracle on
-      Colab; TSan clean; no CUDA symbol reachable outside `src/backend/cuda/`
+      Colab; TSan clean; no CUDA symbol reachable outside `src/backend/cuda/` — **all met.**
 
-**Still to run, on Colab:** `ctest` for `phase5_gpu_server` (six concurrent connections, differing
-chains at differing channel counts, every response diffed against the CPU oracle), then the two
-notebook cells that append `phase5_cuda_cold` and `phase5_cuda_prewarmed` to
-`bench/baseline_phase5.csv`. Expect the two rows to differ in `cold_first_ms` and essentially
-nowhere else — that difference is `ARCHITECTURE.md`'s prewarm claim becoming a measurement.
-
-**TSan over the CUDA build is worth attempting but not worth contorting for.** The portable
-threading is already TSan-clean on the Mac, which is the part this project wrote; the driver
-brings its own threads and TSan has no interceptors for them, so a report inside `libcuda` is a
-tooling limitation rather than a finding. If that happens, record it here and keep the Mac TSan
-run as the gate for our own code rather than suppressing driver frames into a false green.
+**TSan is gated on the Mac, not the CUDA build, deliberately.** The portable threading is
+TSan-clean there, which is the part this project wrote. The driver brings its own threads and
+TSan has no interceptors for them, so a report inside `libcuda` would be a tooling limitation,
+not a finding — the Mac run stays the gate rather than suppressing driver frames into a false
+green.
 
 Phases 6 and 7 are both gated on being "measurably faster" — which requires a number recorded
 *here*, with the harness that produced it. `bench/` in Phase 8 then widens the matrix rather than
