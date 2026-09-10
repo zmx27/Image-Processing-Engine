@@ -91,6 +91,14 @@ class Server {
   std::uint64_t slot_waits() const;
   std::size_t max_queue_depth() const;
 
+  // The backend's own counters — stream occupancy, submit stalls, driver-error
+  // recoveries (docs/PLAN.md Phase 6). Snapshotted by the worker as it shuts down, so
+  // this is only meaningful AFTER stop() has returned; before that it reads as zeroes.
+  // Deliberately not live: the backend belongs to the worker thread and nothing else
+  // may call into it (CLAUDE.md invariant 1), and a lock on the submit path to make a
+  // debug counter readable would be a bad trade.
+  BackendStats backend_stats() const;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

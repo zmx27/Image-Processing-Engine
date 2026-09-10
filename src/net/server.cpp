@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -207,6 +208,12 @@ struct Server::Impl {
   std::atomic<std::uint64_t> frames_completed{0};
   std::atomic<std::uint64_t> frames_failed{0};
   std::atomic<std::uint64_t> connections_accepted{0};
+
+  // Snapshotted by the worker just before it destroys the backend, and read by callers
+  // only after stop() has joined it. The backend is worker-owned for its whole life
+  // (CLAUDE.md invariant 1), so this hand-off is what lets Phase 6's counters be
+  // reported without a second thread ever touching the object that produced them.
+  BackendStats final_backend_stats;
 };
 
 void Server::Impl::start() {
@@ -312,6 +319,10 @@ void Server::Impl::worker_main(std::promise<void> ready) {
 
   worker_loop();
 
+  // Read before the reset below, on the thread that owns the backend — the only thread
+  // allowed to call into it at all.
+  final_backend_stats = backend->stats();
+
   // Destroyed here rather than in ~Impl: from Phase 5 this is where the driver context
   // is torn down, and it must be torn down by the thread that created it.
   backend.reset();
@@ -321,10 +332,14 @@ void Server::Impl::worker_loop() {
   std::unordered_map<JobHandle, InFlight> in_flight;
 
   // A state machine, not a pop/process/respond loop. With the CPU backend `in_flight`
-  // is empty by the end of every iteration, so this always parks in the blocking pop —
-  // but the shape is what Phase 6 needs, where the worker must keep polling events for
-  // K frames already on the GPU instead of blocking for a K+1th (docs/PLAN.md Phase 2,
+  // is empty by the end of every iteration, so this always parks in the blocking pop.
+  // With the Phase 6 CUDA backend it is genuinely a state machine: K frames sit on the
+  // GPU while the worker keeps popping new ones and retiring finished ones, and it must
+  // never park waiting for a K+1th frame that may not be coming (docs/PLAN.md Phase 2,
   // docs/ARCHITECTURE.md decision 4).
+  //
+  // Phase 6 changed nothing here but the wait below, which is what submit/poll from day
+  // one was for.
   for (;;) {
     QueuedFrame frame;
     const bool idle = in_flight.empty();
@@ -341,9 +356,13 @@ void Server::Impl::worker_loop() {
     }
 
     if (!got_work && !in_flight.empty() && completions.empty()) {
-      // Unreachable with a backend that completes inside submit(). Phase 6 replaces it
-      // with a real event poll rather than leaving a spin here.
-      std::this_thread::yield();
+      // Nothing to submit and nothing has finished: work is on the GPU and the only way
+      // to learn it is done is to ask again. Sleeping briefly rather than yielding is
+      // the point — a yield here is a spin, and a spin costs a whole core on a box
+      // whose reader and writer threads want one (Colab hands out two vCPUs). At ~4 ms
+      // a frame, a 100 us poll interval is under 3% of one frame's latency and caps
+      // this loop at a rate that does not register.
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
   }
 }
@@ -640,6 +659,10 @@ std::uint64_t Server::slot_waits() const {
 
 std::size_t Server::max_queue_depth() const {
   return impl_->queue.high_water();
+}
+
+BackendStats Server::backend_stats() const {
+  return impl_->final_backend_stats;
 }
 
 }  // namespace imgjit::net

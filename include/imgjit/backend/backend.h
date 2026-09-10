@@ -61,6 +61,27 @@ struct Completion {
   std::string error;  // empty when status == kOk
 };
 
+// Phase 6's instrumentation, in portable terms so the server can report it without
+// knowing what a stream is (docs/PLAN.md Phase 6, "instrument queue depth, occupancy,
+// stall counts" — queue depth is the server's own Server::max_queue_depth()).
+//
+// Occupancy is the number the phase gate actually turns on. "Measurably faster" and
+// "genuine overlap rather than serialized segments" are two different claims, and a
+// throughput win can be had without the second: if mean_in_flight sits near 1 while K
+// is 4, the pipeline is serialized and the extra streams bought nothing, whatever the
+// FPS says.
+struct BackendStats {
+  std::uint64_t frames_submitted{0};
+  // Times a submit found every stream busy and had to wait for one to retire. Nonzero
+  // is healthy — it means the GPU is the bottleneck rather than the queue feeding it.
+  std::uint64_t submit_stalls{0};
+  std::uint64_t max_in_flight{0};
+  // Driver-error recoveries. A run that serves traffic normally must report 0.
+  std::uint64_t context_recreations{0};
+  // Mean frames on the GPU, sampled once per launch.
+  double mean_in_flight{0.0};
+};
+
 class IBackend {
  public:
   virtual ~IBackend() = default;
@@ -84,6 +105,11 @@ class IBackend {
   // Phase 6 multi-stream completions genuinely retire out of submission order, which
   // is the entire reason seq_num exists in the protocol.
   virtual std::vector<Completion> poll_completions() = 0;
+
+  // Counters accumulated since construction. Not pure: a backend with one frame in
+  // flight at a time has nothing to say here, and the CPU backend's defaults are the
+  // honest answer rather than a stub.
+  virtual BackendStats stats() const { return {}; }
 };
 
 }  // namespace imgjit
