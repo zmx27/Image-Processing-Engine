@@ -1,8 +1,8 @@
 #pragma once
 
-// RAII wrappers for the driver resources Phase 1 needs: CUcontext, CUmodule and
-// CUdeviceptr. No raw cuCtxDestroy / cuModuleUnload / cuMemFree appears in logic
-// code (CLAUDE.md conventions).
+// RAII wrappers for the driver resources: CUcontext, CUmodule, CUdeviceptr, pinned
+// host memory and CUstream. No raw cuCtxDestroy / cuModuleUnload / cuMemFree /
+// cuStreamDestroy appears in logic code (CLAUDE.md conventions).
 
 #include <cuda.h>
 
@@ -164,6 +164,49 @@ class PinnedHostBuffer {
 
   void* pointer_{nullptr};
   std::size_t size_{};
+};
+
+// Phase 5 runs every copy and launch on ONE of these, deliberately (docs/PLAN.md
+// Phase 5): a single stream isolates "is the plumbing correct" from "does async
+// overlap work", so a Phase 5 failure is never ambiguous between the two. Phase 6
+// holds K of them and adds the events that gate buffer return; this type does not
+// change, only how many exist.
+//
+// CU_STREAM_NON_BLOCKING rather than the default: a stream created with the default
+// flag implicitly synchronizes with the NULL stream, which would silently serialize
+// the K streams Phase 6 creates against any library that touches the legacy default.
+// Nothing here uses the NULL stream, so the two are equivalent today — this is the
+// habit that stays correct when there are four of them.
+class CudaStream {
+ public:
+  CudaStream() { CU_CHECK(cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING)); }
+
+  ~CudaStream() { reset(); }
+
+  CudaStream(CudaStream&& other) noexcept : stream_(std::exchange(other.stream_, nullptr)) {}
+
+  CudaStream& operator=(CudaStream&& other) noexcept {
+    if (this != &other) {
+      reset();
+      stream_ = std::exchange(other.stream_, nullptr);
+    }
+    return *this;
+  }
+
+  CudaStream(const CudaStream&) = delete;
+  CudaStream& operator=(const CudaStream&) = delete;
+
+  CUstream get() const { return stream_; }
+
+ private:
+  void reset() noexcept {
+    if (stream_ != nullptr) {
+      CU_CHECK_NOTHROW(cuStreamDestroy(stream_));
+      stream_ = nullptr;
+    }
+  }
+
+  CUstream stream_{};
 };
 
 }  // namespace imgjit::cuda
