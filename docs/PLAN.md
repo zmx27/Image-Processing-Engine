@@ -316,15 +316,60 @@ harness so the comparisons are like-for-like.
 
 ## Phase 6 — Async multi-stream pipeline · env: Colab
 
-- [ ] In-flight table across K streams (start K=4); `cuEventRecord` + poll-and-retire
-- [ ] Event-gated buffer return; device memory pool replacing any per-frame `cuMemAlloc`
-- [ ] Instrument queue depth, occupancy, stall counts
-- [ ] **Context recreation** — teardown/rebuild as a unit: flush the kernel cache and device pool,
+**Implemented; the gate is not signed off.** Everything below is written and compiles, and the
+portable suite is green on macOS in all three trees (plain / ASan / TSan) with invariant 1's grep
+silent. The three claims the phase is *gated* on are all GPU claims, so **`next:` run
+`phase6_gpu_async`, `phase6_gpu_stress` and `phase6_gpu_recovery` on Colab, then the two-run
+benchmark below, and record the numbers here.** Nothing in this section may be called done from a
+Mac — the CUDA half has never executed.
+
+- [x] In-flight table across K streams (K=4 by default, `--streams` to sweep it); `cuEventRecord`
+      + poll-and-retire. `submit()` returns with the frame still on the GPU; `poll_completions()`
+      retires on `cuEventQuery`
+- [x] Event-gated buffer return; device memory pool replacing any per-frame `cuMemAlloc` — the
+      pool is one device ping-pong pair plus a pinned staging buffer per stream slot, claimed and
+      released as a unit
+- [x] Instrument queue depth, occupancy, stall counts — `BackendStats` through `IBackend`,
+      reported by `imgjit-server` at shutdown and asserted in the tests
+- [x] **Context recreation** — teardown/rebuild as a unit: flush the kernel cache and device pool,
       fail every in-flight job with status 6, resume accepting work
-- [ ] Stress test: sustained repeated runs with output checksums, specifically targeting
+- [x] Stress test: sustained repeated runs with output checksums, specifically targeting
       premature slot reuse (`CLAUDE.md` invariant 3)
-- **Done when:** measurably faster than the Phase 5 recorded baseline, Nsight Systems shows genuine
-      H2D/compute/D2H overlap rather than serialized segments, and zero checksum drift under stress
+- [ ] **Gate, Colab:** measurably faster than the Phase 5 recorded baseline (270 fps / 27 ms p50),
+      Nsight Systems shows genuine H2D/compute/D2H overlap rather than serialized segments, and
+      zero checksum drift under stress
+
+**The D2H destination has to be pinned, and that is not a micro-optimization.** An async
+device-to-host copy into *pageable* memory is permitted to behave synchronously, and does. Phase 5
+got away with it because one frame was in flight at a time; keeping it here would have serialized
+the pipeline the streams exist to build, and the failure mode is a benchmark that improves by a
+few percent while Nsight shows the same single-file timeline as before. Each stream slot therefore
+owns a pinned staging buffer, and the worker copies out of it when the frame retires.
+
+**Recreation cannot free the frame slots, which is why they stopped being `cuMemAllocHost`
+memory.** `cuCtxDestroy` frees every allocation made in that context. The slot pool's base pointer
+is held by the server for the life of the process and reader threads are `recv()`ing into
+individual slots at the instant a recreation happens, so driver-owned slot memory would turn
+recovery into a use-after-free across live connections — silent corruption, in the one code path
+whose whole job is to survive a fault. The pages are ours and `cuMemHostRegister` pins them, so
+recreation detaches and reattaches at an address that never moves and nothing outside
+`src/backend/cuda/` learns that anything happened. See `CLAUDE.md` invariant 2.
+
+**Two error classes, because only one of them is the context's fault.** A driver error may be
+sticky — an illegal access poisons a context permanently and every later call returns it — so
+`submit()` treats any `CudaError` as a recreation trigger. An `NvrtcError` is a chain that would
+not compile, which never touched a context; recovering from one by tearing the GPU down would turn
+a single client's bad request into every other client's failed frame.
+
+**The benchmark is two runs of one binary, not a comparison against a build that no longer
+exists.** `--streams 1` is the Phase 5 pipeline (one frame on the GPU at a time), so the A/B is
+like-for-like under the same harness — see `bench/README.md`.
+
+**Occupancy is what separates the two halves of the gate.** "Measurably faster" and "genuinely
+overlapped" are different claims, and the first can be had without the second. If `mean_in_flight`
+sits near 1.0 with `--streams 4`, the pipeline serialized and the throughput came from somewhere
+else, whatever Nsight is squinted at. That is why the number is printed and asserted rather than
+inferred from FPS.
 
 Context recreation lands here, not in Phase 8, because it is a *design constraint on these
 structures* rather than a feature bolted on afterwards: recovery means destroying the kernel

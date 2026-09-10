@@ -28,8 +28,12 @@ Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.
 ## Architectural invariants — do not violate without updating this file
 
 1. **CUcontext ownership**: only the GPU worker thread ever calls a CUDA Driver API function.
-   `cuCtxCreate` runs once at startup on that thread and is never released or migrated. No file
+   `cuCtxCreate` runs on that thread and the context never migrates off it. No file
    outside `src/backend/cuda/` may `#include <cuda.h>` or `<nvrtc.h>`.
+   As of Phase 6 the context is no longer created *exactly once*: an illegal access poisons a
+   context permanently, so `CudaBackend::recreate_context()` destroys and rebuilds it. That is
+   still the same thread doing it, and it is the only relaxation — a context is never created
+   off-worker, never made current on a second thread, and never held by two owners at once.
    Verify: `grep -rE '\b(cu[A-Z]|CU[a-z]|nvrtc)' src/ include/ | grep -v backend/cuda/`
    The alternation matters: `cu[A-Z]` alone catches calls but misses every CUDA *type*
    (`CUstream`, `CUevent`, `CUmodule`, `CUdeviceptr` are `CU[a-z]`) and all of NVRTC — and a
@@ -43,10 +47,21 @@ Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.
    all, and a frame with no device buffer to run in is an error rather than a quiet
    `cuMemAlloc`. Device buffers are sized to the slot size at `allocate_slots()` time, which is
    why the check can never fire through the server (validation caps every payload at that size).
+   **The frame slots are page-locked, not driver-allocated** (`RegisteredHostBuffer`): `cuMemAllocHost`
+   memory is freed by `cuCtxDestroy`, and the server's `SlotPool` holds the slot base pointer for
+   the life of the process while reader threads `recv()` into it — so invariant 1's context
+   recreation would free memory live connections are writing into. Owning the pages here and
+   page-locking them with `cuMemHostRegister` makes recreation a detach/attach at an address that
+   never moves. Device-to-host staging stays `cuMemAllocHost`: it never leaves this directory.
 3. **Event-gated buffer return.** A buffer returns to its pool only after its `CUevent` is
    confirmed complete — never on return of the async copy or launch that used it. This is the
    most important invariant in the codebase: violating it silently corrupts data instead of
    crashing.
+   Structural since Phase 6: a frame's device pair, its device-to-host staging buffer and its
+   stream are one `CudaBackend::StreamSlot`, there is no way to get a device buffer except by
+   claiming one, and `busy` is cleared in exactly one place — immediately after `cuEventQuery`
+   reports that slot's event complete. The pinned input slot is gated by the same event, because
+   the server releases it only when the completion arrives. `phase6_gpu_stress` is the test.
 4. **The kernel cache key is every codegen input, and nothing else.** It must NOT include
    width/height — dimensions are launch-time arguments, not part of the compiled kernel identity.
    Baking them would make every new resolution a cache miss and grow the cache unboundedly,
@@ -84,7 +99,11 @@ Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.
 - RAII wrappers for every driver resource (`CUdeviceptr`, pinned host pointer, `CUstream`,
   `CUevent`, `CUmodule`). No raw `new`/`delete`, no manual `cuMemFree` in logic code.
 - Every Driver API / NVRTC call is wrapped in `CU_CHECK(...)` / `NVRTC_CHECK(...)`, which throws
-  on failure. No unchecked driver calls.
+  on failure. No unchecked driver calls. The two throw *different* types and the difference is
+  load-bearing: a `CudaError` out of the driver may be sticky, so `submit()` recovers by
+  recreating the context, while an `NvrtcError` is a chain that would not compile and must never
+  cost anyone else a frame. `cuEventQuery` is the one call read directly rather than checked,
+  because `CUDA_ERROR_NOT_READY` is its normal answer.
 - Protocol errors produce an error response; they never abort the server.
 - GPU/CPU comparison uses a tolerance (≤1 LSB on `uint8` output), never bit-equality — FMA
   contraction and reassociation make exactness the wrong bar for stencil ops. Pointwise integer

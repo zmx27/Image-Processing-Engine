@@ -40,10 +40,13 @@ endif()
 # building and running on a machine with no toolkit, and linking the driver into it
 # would end that. This one carries the Phase 3 gate — every chain in the corpus against
 # the CPU oracle, plus the compile-counter assertions that make "compiles exactly once"
-# a claim rather than a hope — and the Phase 5 gate, which is the same oracle diff with
-# the whole server and several concurrent connections in between.
+# a claim rather than a hope — the Phase 5 gate, which is the same oracle diff with the
+# whole server and several concurrent connections in between, and the Phase 6 gate:
+# genuine multi-stream residency, checksum stability under sustained load, and context
+# recreation.
 add_executable(imgjit-gpu-tests
   test_cuda_backend.cpp
+  test_gpu_pipeline.cpp
   test_gpu_server.cpp)
 # imgjit_cpu is not listed here: imgjit_cuda -> imgjit_codegen -> imgjit_cpu is all
 # PUBLIC, so cpu/ops.h (used directly for the oracle diff) is already on the include
@@ -56,3 +59,9 @@ target_compile_definitions(imgjit-gpu-tests PRIVATE
 add_test(NAME phase3_gpu_oracle_diff COMMAND imgjit-gpu-tests "[oracle]")
 add_test(NAME phase3_gpu_kernel_cache COMMAND imgjit-gpu-tests "[cache]")
 add_test(NAME phase5_gpu_server COMMAND imgjit-gpu-tests "[gpu-server]")
+
+# Phase 6, split three ways for the same reason as above — "the pipeline is broken" and
+# "recovery is broken" are different mornings.
+add_test(NAME phase6_gpu_async COMMAND imgjit-gpu-tests "[async]")
+add_test(NAME phase6_gpu_stress COMMAND imgjit-gpu-tests "[stress]")
+add_test(NAME phase6_gpu_recovery COMMAND imgjit-gpu-tests "[recovery]")

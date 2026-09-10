@@ -35,6 +35,36 @@ A CPU-backend row (`--backend cpu`, no prewarm) is worth recording alongside the
 fair GPU comparison — it is the scalar oracle — but it is the only row that can be reproduced on a
 Mac, which makes it the one that catches a harness regression without a GPU.
 
+## Recording the Phase 6 comparison
+
+Phase 6 made the pipeline asynchronous across K streams. The A/B is **two runs of the same
+server binary**, differing only in `--streams`, so nothing about the comparison depends on a build
+that no longer exists:
+
+    # the Phase 5 pipeline: one frame on the GPU at a time
+    ./build/tools/imgjit-server --port 9000 --backend cuda --streams 1 \
+        --slots 8 --slots-per-conn 2 --queue 16 --max-payload 16777216 \
+        --prewarm "grayscale,gaussian:1.4,sobel,threshold:0.3" &
+
+    ./build/bench/imgjit-bench --port 9000 --connections 4 --frames 200 \
+        --width 1024 --height 1024 --channels 3 \
+        --ops "grayscale,gaussian:1.4,sobel,threshold:0.3" \
+        --label phase6_streams1 --csv bench/baseline_phase6.csv
+
+Then restart with `--streams 4` and rerun with `--label phase6_streams4`. Same slots, same queue,
+same payload, same chain — only the number of frames the GPU may hold at once changes.
+
+**Read the server's shutdown line as well as the CSV.** It reports mean and peak stream occupancy,
+and that is the half of the phase gate throughput cannot answer: a run whose `mean in flight` sits
+near 1.0 under `--streams 4` did not overlap anything, and whatever made it faster was not the
+pipeline. Confirm the same thing visually with Nsight Systems, which is the other Phase 6 gate:
+
+    nsys profile -o phase6 --trace=cuda ./build/tools/imgjit-server --port 9000 \
+        --backend cuda --streams 4 ...
+
+The timeline must show H2D, kernel and D2H rows genuinely interleaved across streams, not a single
+file of segments with gaps between them.
+
 ## Reading the columns
 
 | Column | Meaning |

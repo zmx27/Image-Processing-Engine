@@ -92,6 +92,12 @@ the project's point: a `pop → copy → launch → sync → respond` loop seria
 makes multiple streams worthless. The worker is a state machine — fill idle stream slots from the
 queue, record an event per slot, poll and retire each iteration.
 
+Landed in Phase 6, and it changed nothing above `CudaBackend` — the payoff for making `IBackend`
+submit/poll in Phase 2 rather than the blocking shape that was tempting then. One further trap
+sits inside it: **the device-to-host copy must land in pinned memory**, because an async copy into
+a pageable destination is allowed to run synchronously and does, which serializes the pipeline
+while every call still looks asynchronous. Each stream slot owns its own staging buffer.
+
 **5. Stencil ops are the fusion boundary.** Pointwise ops (`grayscale`, `invert`, `brightness`,
 `threshold`) fuse into registers at zero memory cost. Stencil ops (`gaussian`, `sobel`) need
 neighbors and terminate a stage. Codegen emits at most `#stencil_ops + 1` kernels, with pointwise
@@ -134,7 +140,12 @@ is a deadlock that only appears under pipelining, which is exactly the load the 
 - **Async CUDA errors are sticky.** They often surface at the next sync point, not the failing
   call, and an illegal-access error can poison the context permanently. Scope decision: tear down
   and recreate the context (flushing the kernel cache and device pool with it), reject in-flight
-  work, resume. This is a deliberate, documented limitation, not an oversight.
+  work, resume. This is a deliberate, documented limitation, not an oversight. Implemented in
+  Phase 6 as `CudaBackend::recreate_context()`. Because the error surfaces at a later call than
+  the one that caused it, there is no attributing it to a frame: everything in flight fails with
+  status 6, which is the documented cost. The *frame slots* deliberately survive — they are
+  process-owned pages pinned with `cuMemHostRegister` rather than `cuMemAllocHost` allocations,
+  precisely so that recovery cannot free memory the connection threads are `recv()`ing into.
 - **NVRTC source must be self-contained, and there is no `kernels/` directory.** NVRTC has no
   default include path, so generated source cannot `#include <cstdint>` (and must not include
   `<cuda_runtime.h>` — that is invariant 8). The stable device helpers therefore live in
