@@ -53,8 +53,10 @@ inline std::string read_sized(std::size_t size_with_nul, auto&& getter) {
 
 }  // namespace detail
 
-// Returns PTX for `source`. Throws CudaError with the NVRTC build log attached if
-// compilation fails — the log is the only useful diagnostic for generated code.
+// Returns PTX for `source`. Throws NvrtcError with the NVRTC build log attached if
+// compilation fails — the log is the only useful diagnostic for generated code. The
+// type matters: from Phase 6 the backend recreates its context on a driver error, and a
+// compile failure must not be read as one (see cuda_check.h).
 inline std::string compile_to_ptx(const std::string& source, const char* program_name,
                                   const std::string& gpu_architecture) {
   const detail::NvrtcProgram program(source, program_name);
@@ -69,7 +71,7 @@ inline std::string compile_to_ptx(const std::string& source, const char* program
       log_size, [&](char* out) { NVRTC_CHECK(nvrtcGetProgramLog(program.get(), out)); });
 
   if (compile_result != NVRTC_SUCCESS) {
-    throw CudaError(std::string("NVRTC failed to compile ") + program_name + " for " +
+    throw NvrtcError(std::string("NVRTC failed to compile ") + program_name + " for " +
                     gpu_architecture + ":\n" + log);
   }
 
