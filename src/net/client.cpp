@@ -11,6 +11,10 @@ namespace imgjit::net {
 Client::Client(const std::string& host, std::uint16_t port) : socket_(connect_to(host, port)) {}
 
 std::uint32_t Client::send(const Image& image, std::string_view chain, std::uint8_t flags) {
+  // Before the write, not after: when the server is applying backpressure this call
+  // blocks in write_exact(), and that wait is latency the client really experienced.
+  const std::chrono::steady_clock::time_point sent_at = std::chrono::steady_clock::now();
+
   RequestHeader header;
   header.flags = flags;
   header.seq_num = next_seq_num_++;
@@ -29,7 +33,7 @@ std::uint32_t Client::send(const Image& image, std::string_view chain, std::uint
   }
 
   pending_.emplace(header.seq_num, PendingFrame{header.seq_num, std::string(chain), image.width(),
-                                                image.height(), image.channels(), flags});
+                                                image.height(), image.channels(), flags, sent_at});
   return header.seq_num;
 }
 
@@ -45,7 +49,8 @@ void Client::send_raw(const RequestHeader& header, std::string_view chain,
   pending_.emplace(header.seq_num,
                    PendingFrame{header.seq_num, std::string(chain),
                                 static_cast<int>(header.width), static_cast<int>(header.height),
-                                static_cast<int>(header.channels), header.flags});
+                                static_cast<int>(header.channels), header.flags,
+                                std::chrono::steady_clock::now()});
   next_seq_num_ = std::max(next_seq_num_, header.seq_num + 1);
 }
 

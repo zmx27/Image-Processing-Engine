@@ -12,6 +12,7 @@
 //
 // Portable: no CUDA, builds on macOS with no toolkit present.
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -33,6 +34,13 @@ struct PendingFrame {
   int height{0};
   int channels{0};
   std::uint8_t flags{0};
+
+  // Stamped as send() begins, so `now() - sent_at` on a matched response is that
+  // frame's round trip. It lives here rather than in the timing harness for the same
+  // reason the pending map does: under pipelining the Nth response is not the Nth
+  // request, so a latency measured against a caller-side send order would be measuring
+  // some other frame (docs/PLAN.md Phase 5, the p50/p99 harness).
+  std::chrono::steady_clock::time_point sent_at{};
 };
 
 struct ClientResponse {
