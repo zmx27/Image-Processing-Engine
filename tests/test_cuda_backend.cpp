@@ -95,6 +95,8 @@ class Gpu {
     return completions.front().output;
   }
 
+  void prewarm(const OpChain& chain, int channels) { backend_.prewarm(chain, channels); }
+
   std::size_t compiles() const { return backend_.compile_count(); }
 
  private:
@@ -235,6 +237,34 @@ TEST_CASE("an empty chain never reaches the compiler", "[cache]") {
   Gpu gpu(64 * 64 * 3);
   const Image input = make_image(64, 64, 3);
   CHECK(gpu.run(input, chain_for("")) == input);
+  CHECK(gpu.compiles() == 0);
+}
+
+TEST_CASE("a prewarmed chain costs its first frame no compile", "[cache]") {
+  // docs/PLAN.md Phase 5: the server warms a configured chain list at startup so the
+  // first client to ask for one hits the cache instead of stalling ~50-200 ms on NVRTC.
+  // The claim is only worth making if the warmed entry is the SAME cache entry the
+  // frame looks up, which is what the compile counter shows here.
+  Gpu gpu(64 * 64 * 4);
+  const OpChain chain = chain_for("grayscale,gaussian:1.4,sobel");
+
+  gpu.prewarm(chain, 3);
+  REQUIRE(gpu.compiles() == 1);
+  gpu.run(make_image(64, 64, 3), chain);
+  CHECK(gpu.compiles() == 1);
+
+  // And the converse, which is CLAUDE.md invariant 4 again: `channels` is baked as a
+  // literal, so warming a chain warms it for ONE channel count. A 4-channel frame of
+  // the same chain is a different kernel and must still compile.
+  gpu.run(make_image(64, 64, 4), chain);
+  CHECK(gpu.compiles() == 2);
+}
+
+TEST_CASE("prewarming an empty chain compiles nothing", "[cache]") {
+  // An identity pass is short-circuited rather than compiled, so asking to warm one is
+  // a no-op instead of an NVRTC invocation on a source file with no __global__ in it.
+  Gpu gpu(64 * 64 * 3);
+  gpu.prewarm(chain_for(""), 3);
   CHECK(gpu.compiles() == 0);
 }
 
