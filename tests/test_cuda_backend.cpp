@@ -87,7 +87,13 @@ class Gpu {
     job.chain = chain;
 
     const imgjit::JobHandle handle = backend_.submit(job);
-    const std::vector<imgjit::Completion> completions = backend_.poll_completions();
+    // Poll until it comes back. From Phase 6 submit() returns while the frame is still
+    // on the GPU, so a single poll is a race rather than a shortcut — and the interface
+    // has said so since Phase 2 ("may complete immediately").
+    std::vector<imgjit::Completion> completions;
+    while (completions.empty()) {
+      completions = backend_.poll_completions();
+    }
     REQUIRE(completions.size() == 1);
     REQUIRE(completions.front().handle == handle);
     INFO("backend error: " << completions.front().error);
