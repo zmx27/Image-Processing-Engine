@@ -184,11 +184,21 @@ int main(int argc, char** argv) {
     // Run 1 pays the NVRTC compile, runs 2..n hit the cache. That difference is the
     // whole point of the cache, so the CLI reports it rather than leaving it to be
     // inferred (docs/PLAN.md Phase 3, "measure cold-compile vs. warm-hit latency").
+    //
+    // Submit then POLL UNTIL IT COMES BACK, rather than assuming one poll suffices. The
+    // CPU backend completes inside submit() and the Phase 5 CUDA backend did too, but
+    // from Phase 6 the CUDA one returns while the frame is still on the GPU — which is
+    // the interface's contract as written since Phase 2, and this loop is what an
+    // honest caller of it looks like. One frame in flight means the loop spins at most
+    // as long as that frame takes.
     imgjit::Image result;
     for (int iteration = 0; iteration < repeat; ++iteration) {
       const auto started = std::chrono::steady_clock::now();
       const imgjit::JobHandle handle = backend->submit(job);
-      const std::vector<imgjit::Completion> completions = backend->poll_completions();
+      std::vector<imgjit::Completion> completions;
+      while (completions.empty()) {
+        completions = backend->poll_completions();
+      }
       const double elapsed_ms = milliseconds_since(started);
 
       if (completions.size() != 1 || completions.front().handle != handle) {

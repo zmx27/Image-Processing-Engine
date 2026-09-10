@@ -48,6 +48,8 @@ void print_usage() {
                "usage: imgjit-server [options]\n"
                "  --port <n>            listen port (0 = ephemeral, printed at startup)\n"
                "  --backend cpu|cuda    default cpu\n"
+               "  --streams <n>         CUDA streams kept in flight (default 4; 1 =\n"
+               "                        the Phase 5 synchronous baseline)\n"
                "  --prewarm \"<chain>[@ch]\"  compile a chain at startup; repeatable\n"
                "                        (channels default 3; --backend cuda only)\n"
                "  --slots <n>           frame slots in the pool (default 8)\n"
@@ -94,6 +96,10 @@ int main(int argc, char** argv) {
   imgjit::net::ServerConfig config;
   std::string backend_name = "cpu";
   std::vector<PrewarmEntry> prewarm;
+  // The Phase 6 A/B axis: --streams 1 is the Phase 5 pipeline (one frame on the GPU at
+  // a time), so "measurably faster" is two runs of this binary rather than a comparison
+  // against a build that no longer exists.
+  std::size_t stream_count = 4;
 
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -101,6 +107,8 @@ int main(int argc, char** argv) {
       config.port = static_cast<std::uint16_t>(std::atoi(argv[++i]));
     } else if (argument == "--backend" && i + 1 < argc) {
       backend_name = argv[++i];
+    } else if (argument == "--streams" && i + 1 < argc) {
+      stream_count = static_cast<std::size_t>(std::atoi(argv[++i]));
     } else if (argument == "--prewarm" && i + 1 < argc) {
       PrewarmEntry entry;
       if (!parse_prewarm(argv[++i], entry)) {
@@ -141,6 +149,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "imgjit-server: --prewarm needs --backend cuda (nothing else compiles)\n");
     return 2;
   }
+  if (stream_count == 0) {
+    std::fprintf(stderr, "imgjit-server: --streams must be at least 1\n");
+    return 2;
+  }
 
   // Runs ON the worker thread, and start() does not return until it has finished — so a
   // missing GPU and a failed prewarm compile both surface as an exception from start()
@@ -150,9 +162,11 @@ int main(int argc, char** argv) {
   };
 #ifdef IMGJIT_ENABLE_CUDA
   if (backend_name == "cuda") {
-    factory = [&prewarm] {
-      auto backend = std::make_unique<imgjit::CudaBackend>();
-      std::printf("imgjit-server: device 0, %s\n", backend->context().compute_arch().c_str());
+    factory = [&prewarm, stream_count] {
+      auto backend = std::make_unique<imgjit::CudaBackend>(0, stream_count);
+      std::printf("imgjit-server: device 0, %s, %zu stream%s\n",
+                  backend->context().compute_arch().c_str(), backend->stream_count(),
+                  backend->stream_count() == 1 ? "" : "s");
       if (!prewarm.empty()) {
         const auto started = std::chrono::steady_clock::now();
         for (const PrewarmEntry& entry : prewarm) {
@@ -192,6 +206,18 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(server.frames_completed()),
                 static_cast<unsigned long long>(server.frames_failed()),
                 static_cast<unsigned long long>(server.slot_waits()), server.max_queue_depth());
+
+    // Read after stop(), which is when it becomes meaningful: the worker snapshots it
+    // on its way out (docs/PLAN.md Phase 6, "instrument queue depth, occupancy, stall
+    // counts"). mean_in_flight near 1.0 with --streams 4 means the pipeline serialized
+    // and the streams bought nothing, whatever the throughput number says.
+    const imgjit::BackendStats stats = server.backend_stats();
+    std::printf("imgjit-server: streams — mean in flight %.2f, peak %llu, %llu submit stalls, "
+                "%llu context recreation%s\n",
+                stats.mean_in_flight, static_cast<unsigned long long>(stats.max_in_flight),
+                static_cast<unsigned long long>(stats.submit_stalls),
+                static_cast<unsigned long long>(stats.context_recreations),
+                stats.context_recreations == 1 ? "" : "s");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "imgjit-server: %s\n", error.what());
