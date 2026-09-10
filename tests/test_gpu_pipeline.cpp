@@ -334,8 +334,16 @@ TEST_CASE("sustained traffic produces no checksum drift", "[stress]") {
     std::string chain;
     int channels;
   };
+  // No `threshold` after a stencil in this corpus, on purpose. That pairing is a
+  // discontinuity — a sub-ULP GPU/CPU disagreement on a post-sobel sample that lands on
+  // the threshold flips it 0<->255 — so the <=1 LSB oracle bound below genuinely does
+  // not hold against the random inputs this test generates (phase3_gpu_oracle_diff
+  // covers that fusion with a curated input instead). This test is about checksum
+  // stability under slot recycling; the chains just need to span the fusion shapes:
+  // prologue fusion + two stencils, a lone stencil with alpha passthrough, a stencil
+  // with an epilogue, and a pointwise-only single-channel run.
   const std::vector<Workload> workloads{
-      {"grayscale,gaussian:1.4,sobel,threshold:0.3", 3},
+      {"grayscale,gaussian:1.4,sobel", 3},
       {"gaussian:1.4", 4},
       {"sobel,invert", 3},
       {"brightness:0.2,grayscale", 1},
