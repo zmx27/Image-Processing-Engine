@@ -43,27 +43,41 @@ that no longer exists:
 
     # the Phase 5 pipeline: one frame on the GPU at a time
     ./build/tools/imgjit-server --port 9000 --backend cuda --streams 1 \
-        --slots 8 --slots-per-conn 2 --queue 16 --max-payload 16777216 \
+        --slots 32 --slots-per-conn 8 --queue 32 --max-payload 16777216 \
         --prewarm "grayscale,gaussian:1.4,sobel,threshold:0.3" &
 
-    ./build/bench/imgjit-bench --port 9000 --connections 4 --frames 200 \
+    ./build/bench/imgjit-bench --port 9000 --connections 4 --window 8 --frames 300 \
         --width 1024 --height 1024 --channels 3 \
         --ops "grayscale,gaussian:1.4,sobel,threshold:0.3" \
-        --label phase6_streams1 --csv bench/baseline_phase6.csv
+        --label phase6_streams1_full --csv bench/baseline_phase6.csv
 
-Then restart with `--streams 4` and rerun with `--label phase6_streams4`. Same slots, same queue,
-same payload, same chain — only the number of frames the GPU may hold at once changes.
+Then restart with `--streams 4` and rerun with `--label phase6_streams4_full`. Same slots, same
+queue, same payload, same chain — only the number of frames the GPU may hold at once changes.
+
+**The `--window` and slot counts here are not the Phase 5 baseline's, on purpose.** `imgjit-bench`
+is a closed loop: with `--window 2` and `--slots-per-conn 2` only 8 frames can be in the system,
+so both runs top out at `4 conns * 2 / round-trip ≈ 300 fps` — the *benchmark's* ceiling, which
+single-stream throughput for this chain already sits at, making the two indistinguishable. `--window
+8` with 32 slots keeps the GPU, not the slot pool, as the bottleneck, which is the only regime
+where `--streams` changes the answer.
+
+**Record a cheap chain too** (`--ops invert`, same sizes, labels `..._cheap`). The full chain is
+compute-bound — `gaussian:1.4` is ~11x11 taps per pixel — so overlap can only hide the ~20% of the
+frame that is PCIe copy, and the ceiling is roughly 1.2-1.4x. `invert` is one pointwise op, almost
+pure copy, and that is where the streams earn their keep.
 
 **Read the server's shutdown line as well as the CSV.** It reports mean and peak stream occupancy,
 and that is the half of the phase gate throughput cannot answer: a run whose `mean in flight` sits
 near 1.0 under `--streams 4` did not overlap anything, and whatever made it faster was not the
-pipeline. Confirm the same thing visually with Nsight Systems, which is the other Phase 6 gate:
+pipeline. `mean in flight` well above 1 (≈2.6 on a T4 at 4 streams) is the software proxy for the
+Nsight timeline below.
 
     nsys profile -o phase6 --trace=cuda ./build/tools/imgjit-server --port 9000 \
         --backend cuda --streams 4 ...
 
 The timeline must show H2D, kernel and D2H rows genuinely interleaved across streams, not a single
-file of segments with gaps between them.
+file of segments with gaps between them. If `nsys` is unavailable (some Colab images ship without
+it), the occupancy counter carries the claim and the timeline is produced later on any GPU box.
 
 ## Reading the columns
 

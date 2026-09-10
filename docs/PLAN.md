@@ -365,11 +365,24 @@ a single client's bad request into every other client's failed frame.
 exists.** `--streams 1` is the Phase 5 pipeline (one frame on the GPU at a time), so the A/B is
 like-for-like under the same harness — see `bench/README.md`.
 
+**The benchmark must be run wide enough that the GPU is the bottleneck.** `imgjit-bench` is a
+closed loop; at the Phase 5 baseline's `--window 2` / `--slots-per-conn 2` only 8 frames are ever
+in the system, both `--streams` settings top out at the same `conns * window / round-trip` ceiling
+(~300 fps for the showcase chain on a T4), and the comparison shows nothing. `--window 8` with 32
+slots is the regime where `--streams` moves the number. First Colab run without this: streams-1
+and streams-4 both reported ~290 fps while the occupancy counter correctly showed mean 1.0 vs 2.6.
+
+**The showcase chain is compute-bound, so its overlap ceiling is ~1.2-1.4x, not 2x.**
+`gaussian:1.4` is ~11x11 taps per pixel; the PCIe copy overlap can hide is ~20% of the frame.
+`bench/baseline_phase6.csv` therefore also carries an `invert` row — one pointwise op, almost pure
+copy — which is where the streams actually earn a large win.
+
 **Occupancy is what separates the two halves of the gate.** "Measurably faster" and "genuinely
 overlapped" are different claims, and the first can be had without the second. If `mean_in_flight`
 sits near 1.0 with `--streams 4`, the pipeline serialized and the throughput came from somewhere
 else, whatever Nsight is squinted at. That is why the number is printed and asserted rather than
-inferred from FPS.
+inferred from FPS. It is also the fallback for the Nsight timeline itself: some Colab images ship
+without `nsys`, and `mean_in_flight` ≈ 2.6 at 4 streams is the same claim the timeline makes.
 
 Context recreation lands here, not in Phase 8, because it is a *design constraint on these
 structures* rather than a feature bolted on afterwards: recovery means destroying the kernel
