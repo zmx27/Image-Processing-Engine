@@ -4,3 +4,9 @@ build-asan/
 build-tsan/
 compile_commands.json
 .DS_Store
+
+# Nsight Systems captures are tens of MB of binary — the committed Phase 6 proof is the
+# derived timeline PNG + trace CSV (see bench/phase6_results.md), not the raw report.
+*.nsys-rep
+*.qdstrm
+*.sqlite

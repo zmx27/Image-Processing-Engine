@@ -46,19 +46,21 @@ that no longer exists:
         --slots 32 --slots-per-conn 8 --queue 32 --max-payload 16777216 \
         --prewarm "grayscale,gaussian:1.4,sobel,threshold:0.3" &
 
-    ./build/bench/imgjit-bench --port 9000 --connections 4 --window 8 --frames 300 \
+    ./build/bench/imgjit-bench --port 9000 --connections 4 --window 8 --frames 300 --no-echo \
         --width 1024 --height 1024 --channels 3 \
         --ops "grayscale,gaussian:1.4,sobel,threshold:0.3" \
         --label phase6_streams1_full --csv bench/baseline_phase6.csv
 
 Then restart with `--streams 4` and rerun with `--label phase6_streams4_full`. Same slots, same
 queue, same payload, same chain — only the number of frames the GPU may hold at once changes.
+`bench/phase6_results.md` collects the numbers, the occupancy counter and the Nsight artifacts.
 
-**The `--window` and slot counts here are not the Phase 5 baseline's, on purpose.** `imgjit-bench`
-is a closed loop: with `--window 2` and `--slots-per-conn 2` only 8 frames can be in the system,
-so both runs top out at `4 conns * 2 / round-trip ≈ 300 fps` — the *benchmark's* ceiling, which
-single-stream throughput for this chain already sits at, making the two indistinguishable. `--window
-8` with 32 slots keeps the GPU, not the slot pool, as the bottleneck, which is the only regime
+**The `--window`, `--no-echo` and slot counts here are not the Phase 5 baseline's, on purpose.**
+`imgjit-bench` is a closed loop, and on a 2-vCPU Colab box two things cap it below the GPU:
+`--window 2` / `--slots-per-conn 2` lets only 8 frames exist at once (`4 conns * 2 / round-trip ≈
+300 fps`), and the 3 MB echo + client-side `memcmp` per frame makes the *client* the bottleneck —
+with echo on, the trivial `invert` chain barely outran the heavy one, which is the tell. `--window
+8` with 32 slots and `--no-echo` puts the GPU back in the critical path, which is the only regime
 where `--streams` changes the answer.
 
 **Record a cheap chain too** (`--ops invert`, same sizes, labels `..._cheap`). The full chain is
