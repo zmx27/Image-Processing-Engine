@@ -82,6 +82,23 @@ int max_abs_difference(const Image& lhs, const Image& rhs) {
   return worst;
 }
 
+// Mean absolute difference over every byte. This is what separates float rounding from
+// corruption in the stress test: GPU/CPU disagreement on a stencil is a handful of
+// knife-edge samples out of ~200k, so the mean is ~0.01, while a single frame written
+// into a slot whose previous transfer had not finished is a contiguous wrong block that
+// pulls the mean past 1 on its own.
+double mean_abs_difference(const Image& lhs, const Image& rhs) {
+  if (lhs.byte_count() != rhs.byte_count() || lhs.byte_count() == 0) {
+    return 256.0;
+  }
+  std::uint64_t total = 0;
+  for (std::size_t i = 0; i < lhs.byte_count(); ++i) {
+    const int difference = static_cast<int>(lhs.data()[i]) - static_cast<int>(rhs.data()[i]);
+    total += static_cast<std::uint64_t>(difference < 0 ? -difference : difference);
+  }
+  return static_cast<double>(total) / static_cast<double>(lhs.byte_count());
+}
+
 // FNV-1a over the output bytes. Cheap enough to run on every one of hundreds of frames,
 // and the only property asked of it is that a single corrupted byte changes it.
 std::uint64_t checksum(const Image& image) {
@@ -162,7 +179,14 @@ ServerConfig stress_config() {
 // thread-safe.
 struct StressResult {
   std::uint32_t frames_ok{0};
+  // Worst max-abs and worst mean-abs difference against the CPU oracle, over the first
+  // sighting of each variant. The pair is the backstop against a pipeline that corrupts
+  // deterministically (which `drifted` alone would not catch): a stencil's float
+  // divergence is a few LSB on a scatter of knife-edge samples, so `worst_difference`
+  // stays small and `worst_mean` stays near zero, while a half-written frame is a
+  // contiguous wrong block that blows past both.
   int worst_difference{0};
+  double worst_mean{0.0};
   // variant index -> the checksum the GPU produced the FIRST time it saw those bytes.
   // Every later sighting must match it exactly.
   std::unordered_map<int, std::uint64_t> reference;
@@ -206,9 +230,10 @@ void run_stress_client(std::uint16_t port, const std::vector<Image>& variants,
       const auto known = result.reference.find(variant);
       if (known == result.reference.end()) {
         result.reference.emplace(variant, seen);
-        result.worst_difference = std::max(
-            result.worst_difference,
-            max_abs_difference(expected[static_cast<std::size_t>(variant)], response.image));
+        const Image& want = expected[static_cast<std::size_t>(variant)];
+        result.worst_difference =
+            std::max(result.worst_difference, max_abs_difference(want, response.image));
+        result.worst_mean = std::max(result.worst_mean, mean_abs_difference(want, response.image));
       } else if (known->second != seen) {
         ++result.drifted;
       }
@@ -310,8 +335,18 @@ TEST_CASE("more frames than streams stall rather than overrun", "[async]") {
   for (const imgjit::Completion& completion : collected) {
     INFO("backend error: " << completion.error);
     REQUIRE(completion.status == imgjit::JobStatus::kOk);
-    CHECK(max_abs_difference(expected, completion.output) <= 1);
   }
+  // Same bytes in, same kernel, 12 times through 2 stream slots that are reused ~5 times
+  // each — so every output must be bit-identical to the first. This is the invariant-3
+  // check here: a device buffer handed back before its event completed would give one
+  // frame different bytes from the rest.
+  for (const imgjit::Completion& completion : collected) {
+    CHECK(completion.output == collected.front().output);
+  }
+  // Loose oracle backstop — sobel's float divergence can reach a few LSB (see the
+  // reasoning in the [stress] case), so this only asserts the kernel is not wildly
+  // wrong, not <=1.
+  CHECK(max_abs_difference(expected, collected.front().output) <= 8);
 
   const imgjit::BackendStats stats = pipeline.backend().stats();
   CHECK(stats.frames_submitted == kFrames);
@@ -387,10 +422,19 @@ TEST_CASE("sustained traffic produces no checksum drift", "[stress]") {
     CHECK(results[w].frames_ok == per_client);
     // Zero, not "small". Two runs of one kernel over identical bytes on one GPU are
     // bit-identical, so any drift at all is a frame that read memory it did not own.
+    // This is the actual invariant-3 gate.
     CHECK(results[w].drifted == 0);
     // And the answers are right in the first place, not merely stable — a pipeline that
-    // corrupted every copy of a variant identically would pass the check above alone.
-    CHECK(results[w].worst_difference <= 1);
+    // corrupted every copy of a variant identically would pass the drift check alone.
+    // Not <=1 LSB: `sobel` is a difference operator (|coefficients| sum to 8), so
+    // GPU/CPU float reassociation amplifies to ~4 LSB on a scatter of samples
+    // (docs/ARCHITECTURE.md decision 5), and over ~200k samples per frame that tail is
+    // sampled every run. The mean is what makes this a corruption check rather than a
+    // numerics check: rounding noise leaves it near zero, a contiguous wrong block from
+    // a half-written slot does not.
+    INFO("worst LSB " << results[w].worst_difference << ", mean " << results[w].worst_mean);
+    CHECK(results[w].worst_difference <= 8);
+    CHECK(results[w].worst_mean < 0.25);
   }
 
   CHECK(server.frames_completed() ==
@@ -486,7 +530,10 @@ TEST_CASE("a chain that cannot compile does not take the context down", "[recove
   REQUIRE(served.size() == 1);
   INFO("backend error: " << served.front().error);
   CHECK(served.front().status == imgjit::JobStatus::kOk);
-  CHECK(max_abs_difference(imgjit::cpu::apply_chain(input, chain), served.front().output) <= 1);
+  // <=8, not <=1: this chain has a sobel, whose float divergence from the oracle can
+  // reach a few LSB on noise (see the [stress] case). The point here is that the frame
+  // was served correctly at all, not its exact numerics.
+  CHECK(max_abs_difference(imgjit::cpu::apply_chain(input, chain), served.front().output) <= 8);
   // The point of the case: nothing was rebuilt over a bad job.
   CHECK(pipeline.backend().stats().context_recreations == 0);
 }
