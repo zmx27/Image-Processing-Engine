@@ -1,1 +1,4 @@
 label,connections,window,frames_per_conn,width,height,channels,chains,fps,req_mb_per_s,p50_ms,p99_ms,mean_ms,max_ms,cold_first_ms,failures
+phase5_cuda_cold,4,2,200,1024,1024,3,1,270.498,811.493,27.2876,40.4256,29.063,116.343,114.216,0
+phase5_cuda_prewarmed,4,2,200,1024,1024,3,1,276.806,830.417,27.6005,44.3929,28.7399,54.3916,40.7564,0
+phase5_cpu_mac,2,2,50,256,256,3,1,68.1361,12.7755,57.392,88.2641,58.1162,88.2641,54.1651,0
