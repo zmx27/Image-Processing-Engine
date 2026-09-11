@@ -347,21 +347,42 @@ TEST_CASE("tiled output matches the naive kernel's", "[tiling]") {
       "invert,gaussian:1,invert,sobel,invert",
   };
 
-  Gpu naive(bytes);
+  // Every naive output, computed and the backend closed out BEFORE any tiled backend —
+  // and so any tiled CUcontext — exists. Only one CudaBackend may be alive on this
+  // thread at a time: cuCtxCreate makes the new context current on the calling thread
+  // without popping the old one, so a second live backend does not coexist with the
+  // first, it SHADOWS it — every CUfunction the first compiled belongs to a context
+  // that is no longer current, and launching one is CUDA_ERROR_INVALID_HANDLE. The real
+  // server never does this (it owns exactly one CudaBackend for its whole life); this is
+  // a rule about the test, not about CudaBackend.
+  std::vector<Image> expected;
+  double naive_kernel_ms = 0.0;
+  {
+    Gpu naive(bytes);
+    for (const int channels : {1, 3, 4}) {
+      const Image input = make_image(kWidth, kHeight, channels);
+      for (const std::string_view text : kChains) {
+        expected.push_back(naive.run(input, chain_for(text)));
+      }
+    }
+    naive_kernel_ms = naive.stats().mean_kernel_ms;
+  }
+  CHECK(naive_kernel_ms > 0.0);
+
   for (const int tile_size : {8, 16, 32}) {
     Gpu tiled(bytes, TileVariant::kTiled, tile_size);
+    std::size_t index = 0;
     for (const int channels : {1, 3, 4}) {
       const Image input = make_image(kWidth, kHeight, channels);
       for (const std::string_view text : kChains) {
         CAPTURE(tile_size, text, channels);
         const OpChain chain = chain_for(text);
-        CHECK(max_abs_difference(naive.run(input, chain), tiled.run(input, chain)) <= 1);
+        CHECK(max_abs_difference(expected[index++], tiled.run(input, chain)) <= 1);
       }
     }
     // The benchmark's instrument reads something: every frame above ran kernels.
     CHECK(tiled.stats().mean_kernel_ms > 0.0);
   }
-  CHECK(naive.stats().mean_kernel_ms > 0.0);
 }
 
 TEST_CASE("the tile configuration is part of the kernel identity", "[tiling]") {
