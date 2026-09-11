@@ -70,7 +70,14 @@ class CudaBackend final : public IBackend {
 
   // Creates the context. Constructing this object is the "cuCtxCreate on the worker
   // thread" step; there is no other entry point that creates one.
-  explicit CudaBackend(int device_ordinal = 0, std::size_t stream_count = kDefaultStreams);
+  //
+  // `tile` / `tile_size` pick the stencil kernels' variant (docs/PLAN.md Phase 7) and go
+  // into every KernelKey this backend builds, so a naive and a tiled backend never share
+  // a cache entry. Naive by default. Throws std::invalid_argument on a tile codegen
+  // cannot emit (cuda::is_supported_tile), so a bad --tile fails at startup rather than
+  // as an error on every frame.
+  explicit CudaBackend(int device_ordinal = 0, std::size_t stream_count = kDefaultStreams,
+                       TileVariant tile = TileVariant::kNaive, int tile_size = 0);
 
   std::byte* allocate_slots(std::size_t count, std::size_t bytes) override;
   JobHandle submit(const FrameJob& job) override;
@@ -117,6 +124,10 @@ class CudaBackend final : public IBackend {
 
     cuda::CudaStream stream;
     cuda::CudaEvent done;
+    // Timing-enabled, unlike `done`: recorded either side of the stages so that retire
+    // can read the frame's kernel time off the GPU clock (BackendStats::mean_kernel_ms).
+    cuda::CudaEvent kernels_begin{CU_EVENT_DEFAULT};
+    cuda::CudaEvent kernels_end{CU_EVENT_DEFAULT};
     // Ping-pong for multi-stage execution. Two is the whole requirement at any chain
     // length: each stage reads one and writes the other.
     cuda::DeviceBuffer front;
@@ -146,6 +157,10 @@ class CudaBackend final : public IBackend {
   // is returned to the free list.
   void retire_ready_streams();
 
+  // The frame's codegen inputs plus this backend's own (the tile). prewarm() and launch()
+  // both build their keys here, so a warmed entry is always the entry a frame looks up.
+  KernelKey key_for(const OpChain& chain, int channels) const;
+
   void build_stream_slots();
   void fail_job(JobHandle handle, const std::string& reason);
 
@@ -166,6 +181,8 @@ class CudaBackend final : public IBackend {
   std::vector<Completion> completed_;
   int device_ordinal_{0};
   std::size_t stream_count_{kDefaultStreams};
+  TileVariant tile_{TileVariant::kNaive};
+  int tile_size_{0};
   std::size_t slot_bytes_{0};
   JobHandle next_handle_{1};
   std::uint64_t next_submit_order_{1};
@@ -173,6 +190,8 @@ class CudaBackend final : public IBackend {
   BackendStats stats_;
   double occupancy_sum_{0.0};
   std::uint64_t occupancy_samples_{0};
+  double kernel_ms_sum_{0.0};
+  std::uint64_t kernel_samples_{0};
 };
 
 }  // namespace imgjit

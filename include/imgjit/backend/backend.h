@@ -80,6 +80,15 @@ struct BackendStats {
   std::uint64_t context_recreations{0};
   // Mean frames on the GPU, sampled once per launch.
   double mean_in_flight{0.0};
+  // Phase 7: mean GPU time per frame from the start of its first stage to the end of its
+  // last, read off the GPU's own clock — the kernels alone, with no copy, host work or
+  // compile in it. This is what the naive|tiled A/B turns on: a 3x3 sobel is a sliver
+  // of a copy-bound frame, so end-to-end FPS cannot show it getting faster.
+  //
+  // A clean per-frame kernel time only at ONE stream. With several, the GPU time-slices
+  // other frames' kernels into this frame's window (kernels do not overlap kernels on a
+  // full-size image — docs/PLAN.md Phase 6), so the number then includes the wait.
+  double mean_kernel_ms{0.0};
 };
 
 class IBackend {

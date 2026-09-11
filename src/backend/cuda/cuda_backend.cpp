@@ -11,22 +11,30 @@
 namespace imgjit {
 namespace {
 
-// 16x16 = 256 threads, the usual starting point for a 2D image kernel. Phase 7 makes
-// the tile a codegen input and sweeps it; until then it is a launch detail and stays
-// out of KernelKey.
-constexpr unsigned int kBlockDim = 16;
-
-unsigned int grid_dim(int extent) {
-  return (static_cast<unsigned int>(extent) + kBlockDim - 1) / kBlockDim;
+// Blocks per grid along one axis. The block edge itself comes from codegen
+// (GeneratedStage::block_dim), not from here: a tiled stage's __shared__ tile is baked
+// for exactly that many threads per side, so the executor keeping its own copy of the
+// rule is how the two would drift apart.
+unsigned int grid_dim(int extent, unsigned int block) {
+  return (static_cast<unsigned int>(extent) + block - 1) / block;
 }
 
 }  // namespace
 
-CudaBackend::CudaBackend(int device_ordinal, std::size_t stream_count)
+CudaBackend::CudaBackend(int device_ordinal, std::size_t stream_count, TileVariant tile,
+                         int tile_size)
     : context_(std::in_place, device_ordinal),
       cache_(context_->compute_arch()),
       device_ordinal_(device_ordinal),
-      stream_count_(stream_count == 0 ? 1 : stream_count) {}
+      stream_count_(stream_count == 0 ? 1 : stream_count),
+      tile_(tile),
+      tile_size_(tile_size) {
+  if (!cuda::is_supported_tile(tile, tile_size)) {
+    throw std::invalid_argument("CudaBackend: unsupported tile size " + std::to_string(tile_size) +
+                                " (naive takes 0, tiled takes 1-" +
+                                std::to_string(cuda::kMaxTileSize) + ")");
+  }
+}
 
 std::byte* CudaBackend::allocate_slots(std::size_t count, std::size_t bytes) {
   if (host_slots_.has_value()) {
@@ -65,10 +73,16 @@ void CudaBackend::prewarm(const OpChain& chain, int channels) {
   if (chain.ops.empty()) {
     return;  // an identity pass is short-circuited, so there is no kernel to warm
   }
+  cache_.get(key_for(chain, channels));
+}
+
+KernelKey CudaBackend::key_for(const OpChain& chain, const int channels) const {
   KernelKey key;
   key.chain = chain;
   key.channels = channels;
-  cache_.get(key);
+  key.tile = tile_;
+  key.tile_size = tile_size_;
+  return key;
 }
 
 JobHandle CudaBackend::submit(const FrameJob& job) {
@@ -134,10 +148,7 @@ void CudaBackend::launch(const FrameJob& job, const JobHandle handle) {
     return;
   }
 
-  KernelKey key;
-  key.chain = job.chain;
-  key.channels = job.channels;
-  const cuda::CompiledChain& compiled = cache_.get(key);
+  const cuda::CompiledChain& compiled = cache_.get(key_for(job.chain, job.channels));
 
   // CLAUDE.md invariant 2, enforced rather than merely intended: there is no per-frame
   // allocation path here at all, so the only way to get a device buffer is to have
@@ -171,17 +182,25 @@ void CudaBackend::launch(const FrameJob& job, const JobHandle handle) {
   // other while running concurrently with the other K-1 streams.
   CU_CHECK(cuMemcpyHtoDAsync(source, input_bytes, bytes, stream));
 
+  // The stages, bracketed by a pair of timing events: their difference at retire is
+  // this frame's kernel time on the GPU's own clock, with neither copy in it and no
+  // NVRTC compile either — that already happened, on the host, in cache_.get() above.
+  CU_CHECK(cuEventRecord(slot.kernels_begin.get(), stream));
+
   // Every stage has the same signature, so multi-stage execution is a ping-pong: read
   // `source`, write `destination`, swap. After the loop `source` names the buffer the
-  // last stage wrote.
+  // last stage wrote. Each stage launches with the block edge codegen emitted it for.
   int width = job.width;
   int height = job.height;
-  for (const CUfunction stage : compiled.stage_functions) {
+  for (std::size_t s = 0; s < compiled.stage_functions.size(); ++s) {
+    const auto block = static_cast<unsigned int>(compiled.program.stages[s].block_dim);
     void* arguments[] = {&source, &destination, &width, &height};
-    CU_CHECK(cuLaunchKernel(stage, grid_dim(width), grid_dim(height), 1, kBlockDim, kBlockDim, 1, 0,
-                            stream, arguments, nullptr));
+    CU_CHECK(cuLaunchKernel(compiled.stage_functions[s], grid_dim(width, block),
+                            grid_dim(height, block), 1, block, block, 1, 0, stream, arguments,
+                            nullptr));
     std::swap(source, destination);
   }
+  CU_CHECK(cuEventRecord(slot.kernels_end.get(), stream));
 
   // Into PINNED memory, which is what makes this copy actually asynchronous — an async
   // D2H into a pageable destination is permitted to block, and would serialize the
@@ -248,6 +267,13 @@ void CudaBackend::retire_ready_streams() {
       continue;  // still on the GPU; nothing this frame touched may be reused yet
     }
     CU_CHECK(status);  // anything but success-or-not-ready is a driver failure
+
+    // Both timing events were recorded ahead of `done` on this stream, so both have
+    // completed and the elapsed time between them is final.
+    float kernel_ms = 0.0F;
+    CU_CHECK(cuEventElapsedTime(&kernel_ms, slot.kernels_begin.get(), slot.kernels_end.get()));
+    kernel_ms_sum_ += static_cast<double>(kernel_ms);
+    ++kernel_samples_;
 
     // CLAUDE.md invariant 3, and this is the only place in the project that decides a
     // frame is finished. Past this point — and not one line before it — the device
@@ -341,6 +367,8 @@ BackendStats CudaBackend::stats() const {
   BackendStats snapshot = stats_;
   snapshot.mean_in_flight =
       occupancy_samples_ == 0 ? 0.0 : occupancy_sum_ / static_cast<double>(occupancy_samples_);
+  snapshot.mean_kernel_ms =
+      kernel_samples_ == 0 ? 0.0 : kernel_ms_sum_ / static_cast<double>(kernel_samples_);
   return snapshot;
 }
 

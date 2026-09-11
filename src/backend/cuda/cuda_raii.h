@@ -305,12 +305,16 @@ class CudaStream {
 // pinned input slot the server releases on the completion — stays off-limits until
 // cuEventQuery on this reports success.
 //
-// CU_EVENT_DISABLE_TIMING because nothing here reads an elapsed time off an event; the
-// timings come from the harness on the client side. Disabling it makes both the record
-// and the query cheaper, which matters on a path polled once per worker iteration.
+// CU_EVENT_DISABLE_TIMING by default, because the event that gates buffer return is
+// never read for a time, and disabling timing makes both the record and the query
+// cheaper — which matters on a path polled once per worker iteration. Phase 7's
+// kernel-time pair is the one place that reads an elapsed time off an event, and it
+// asks for CU_EVENT_DEFAULT explicitly.
 class CudaEvent {
  public:
-  CudaEvent() { CU_CHECK(cuEventCreate(&event_, CU_EVENT_DISABLE_TIMING)); }
+  explicit CudaEvent(unsigned int flags = CU_EVENT_DISABLE_TIMING) {
+    CU_CHECK(cuEventCreate(&event_, flags));
+  }
 
   ~CudaEvent() { reset(); }
 
