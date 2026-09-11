@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,11 +24,14 @@
 #include "catch_amalgamated.hpp"
 #include "imgjit/backend/cpu/ops.h"
 #include "imgjit/core/image.h"
+#include "imgjit/core/kernel_key.h"
 #include "imgjit/core/op_chain.h"
 
 using imgjit::Image;
+using imgjit::KernelKey;
 using imgjit::OpChain;
 using imgjit::parse_op_chain;
+using imgjit::TileVariant;
 
 namespace {
 
@@ -71,8 +75,11 @@ int max_abs_difference(const Image& lhs, const Image& rhs) {
 // and how CLAUDE.md invariant 2 says slots are allocated: once, at startup.
 class Gpu {
  public:
-  explicit Gpu(std::size_t max_slot_bytes)
-      : slot_(backend_.allocate_slots(1, max_slot_bytes)), max_bytes_(max_slot_bytes) {}
+  explicit Gpu(std::size_t max_slot_bytes, TileVariant tile = TileVariant::kNaive,
+               int tile_size = 0)
+      : backend_(0, imgjit::CudaBackend::kDefaultStreams, tile, tile_size),
+        slot_(backend_.allocate_slots(1, max_slot_bytes)),
+        max_bytes_(max_slot_bytes) {}
 
   Image run(const Image& input, const OpChain& chain) {
     REQUIRE(input.byte_count() <= max_bytes_);
@@ -104,6 +111,7 @@ class Gpu {
   void prewarm(const OpChain& chain, int channels) { backend_.prewarm(chain, channels); }
 
   std::size_t compiles() const { return backend_.compile_count(); }
+  imgjit::BackendStats stats() const { return backend_.stats(); }
 
  private:
   imgjit::CudaBackend backend_;
@@ -288,4 +296,113 @@ TEST_CASE("a malformed job is an error completion, not a throw", "[cache]") {
   CHECK(completions.front().handle == handle);
   CHECK(completions.front().status == imgjit::JobStatus::kError);
   CHECK_FALSE(completions.front().error.empty());
+}
+
+// ---------------------------------------------------------------------------------------
+// Phase 7 (docs/PLAN.md): the tiled variant. Registered as its own ctest case,
+// phase7_gpu_tiling, so a tiling failure is never confused with the naive gate above.
+// ---------------------------------------------------------------------------------------
+
+TEST_CASE("the tiled variant matches the CPU oracle at every tile size", "[tiling]") {
+  // The same corpus, the same input and the same <=1 LSB bar as the naive gate, so a
+  // tiled kernel is held to exactly what the naive one was.
+  //
+  // 37x23 earns more here than it did there. At every tile size it leaves a partial tile
+  // on at least one axis, so threads past the image edge must still load their apron
+  // cells and reach the barrier. At tile 8, gaussian:4's radius-12 apron is wider than
+  // the tile itself, so the cooperative load loops 16 times per thread. And the image is
+  // smaller than the widest apron, so every edge of every tile goes through the clamp.
+  constexpr int kWidth = 37;
+  constexpr int kHeight = 23;
+  for (const int tile_size : {8, 16, 32}) {
+    Gpu gpu(static_cast<std::size_t>(kWidth) * kHeight * 4, TileVariant::kTiled, tile_size);
+    for (const int channels : {1, 3, 4}) {
+      const Image input = make_image(kWidth, kHeight, channels);
+      for (const std::string_view text : kCorpus) {
+        CAPTURE(tile_size, text, channels);
+        const OpChain chain = chain_for(text);
+        CHECK(max_abs_difference(imgjit::cpu::apply_chain(input, chain), gpu.run(input, chain)) <=
+              1);
+      }
+    }
+  }
+}
+
+TEST_CASE("tiled output matches the naive kernel's", "[tiling]") {
+  // Several tiles across at every size, so interior tiles — whose apron needs no clamping
+  // at all — are exercised, not only edge tiles.
+  //
+  // The two variants run the same arithmetic on the same operands: codegen emits the
+  // same accumulation text around a different fetch (test_codegen.cpp asserts that), and
+  // every staged sample is exactly the value the naive tap computes, since the load IS
+  // the naive tap. So they are expected to agree exactly; <=1 is the plan's bar.
+  constexpr int kWidth = 131;
+  constexpr int kHeight = 97;
+  const std::size_t bytes = static_cast<std::size_t>(kWidth) * kHeight * 4;
+  constexpr std::string_view kChains[] = {
+      "gaussian:1.4",
+      "gaussian:4",
+      "sobel",
+      "grayscale,gaussian:1.4,sobel,threshold:0.3",
+      "invert,gaussian:1,invert,sobel,invert",
+  };
+
+  Gpu naive(bytes);
+  for (const int tile_size : {8, 16, 32}) {
+    Gpu tiled(bytes, TileVariant::kTiled, tile_size);
+    for (const int channels : {1, 3, 4}) {
+      const Image input = make_image(kWidth, kHeight, channels);
+      for (const std::string_view text : kChains) {
+        CAPTURE(tile_size, text, channels);
+        const OpChain chain = chain_for(text);
+        CHECK(max_abs_difference(naive.run(input, chain), tiled.run(input, chain)) <= 1);
+      }
+    }
+    // The benchmark's instrument reads something: every frame above ran kernels.
+    CHECK(tiled.stats().mean_kernel_ms > 0.0);
+  }
+  CHECK(naive.stats().mean_kernel_ms > 0.0);
+}
+
+TEST_CASE("the tile configuration is part of the kernel identity", "[tiling]") {
+  // CLAUDE.md invariant 4, asserted at the cache by key rather than through a backend
+  // (a backend has one tile configuration for life). Naive, tile 16 and tile 32 are
+  // three kernels — the tile edge is baked into the __shared__ array, so a naive|tiled
+  // flag alone would have collided the last two — and asking for one again compiles
+  // nothing.
+  imgjit::CudaBackend backend;
+  KernelKey key;
+  key.chain = chain_for("gaussian:1.4,sobel");
+  key.channels = 3;
+
+  backend.cache().get(key);
+  key.tile = TileVariant::kTiled;
+  key.tile_size = 16;
+  backend.cache().get(key);
+  key.tile_size = 32;
+  backend.cache().get(key);
+  CHECK(backend.compile_count() == 3);
+
+  key.tile_size = 16;
+  backend.cache().get(key);
+  CHECK(backend.compile_count() == 3);
+}
+
+TEST_CASE("a tiled backend still compiles once across resolutions", "[tiling]") {
+  // The tile edge is baked; the image size is still a launch argument. If tiling had
+  // leaked a dimension into the source — the apron origin is computed from blockIdx,
+  // which is exactly where one could — this would compile three times.
+  Gpu gpu(256 * 256 * 3, TileVariant::kTiled, 16);
+  const OpChain chain = chain_for("gaussian:1.4,sobel");
+  gpu.run(make_image(64, 64, 3), chain);
+  gpu.run(make_image(128, 96, 3), chain);
+  gpu.run(make_image(256, 256, 3), chain);
+  CHECK(gpu.compiles() == 1);
+}
+
+TEST_CASE("a tile codegen cannot emit is refused when the backend is built", "[tiling]") {
+  // At construction, which for the server is startup: otherwise a bad --tile is a
+  // server that accepts connections and answers every frame with status 6.
+  CHECK_THROWS_AS(imgjit::CudaBackend(0, 1, TileVariant::kTiled, 64), std::invalid_argument);
+  CHECK_THROWS_AS(imgjit::CudaBackend(0, 1, TileVariant::kNaive, 16), std::invalid_argument);
 }
