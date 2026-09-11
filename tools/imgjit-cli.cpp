@@ -47,6 +47,8 @@ void print_usage() {
                "  --backend cpu|cuda   default cpu\n"
                "  --tile naive|<n>     stencil kernels: naive (default), or tiled through an\n"
                "                       n x n __shared__ tile, n in 1..32\n"
+               "                       big win on gaussian; no win on sobel, whose radius-1\n"
+               "                       apron is too small to be worth tiling (bench/phase7_results.md)\n"
                "  --dump-source <file> write the generated CUDA source (works without a GPU)\n"
                "  --dump-ptx <file>    write the PTX NVRTC produced (--backend cuda only)\n"
                "  --repeat <n>         run the chain n times; run 1 is cold, the rest warm\n");

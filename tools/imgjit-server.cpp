@@ -53,6 +53,8 @@ void print_usage() {
                "                        the Phase 5 synchronous baseline)\n"
                "  --tile naive|<n>      stencil kernels: naive (default), or tiled through\n"
                "                        an n x n __shared__ tile, n in 1..32 (cuda only)\n"
+               "                        big win on gaussian; no win on sobel, whose radius-1\n"
+               "                        apron is too small to be worth tiling (bench/phase7_results.md)\n"
                "  --prewarm \"<chain>[@ch]\"  compile a chain at startup; repeatable\n"
                "                        (channels default 3; --backend cuda only)\n"
                "  --slots <n>           frame slots in the pool (default 8)\n"

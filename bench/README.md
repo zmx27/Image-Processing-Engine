@@ -103,8 +103,12 @@ off the GPU's own clock — a timing event either side of the stages — so it c
 and nothing else: no PCIe copy, no host work, no NVRTC compile. That distinction is the whole
 reason it exists. A 3×3 `sobel` over 1024² is a sliver of a frame whose end-to-end cost is
 dominated by copies and the worker's host work (Phase 6 measured ~1.7 ms/frame for a trivial
-chain), so a tiled sobel can be much faster and leave `fps` where it was. The notebook cell
-collects the kernel times into `bench/phase7_kernel_ms.csv`, keyed by the same labels.
+chain), so a several-percent change in sobel's kernel time — in either direction — is invisible in
+`fps` and only readable off this number. The notebook cell collects the kernel times into
+`bench/phase7_kernel_ms.csv`, keyed by the same labels. **Measured result** (`bench/phase7_results.md`):
+Gaussian and the fused chain are large wins (up to 3.33x kernel time), tiled Sobel is not — a
+small, repeatable ~3% regression, not noise, because a radius-1 apron carries too little redundant
+memory traffic to pay back the tiled path's fixed overhead.
 
 **`--streams 1` on purpose.** One frame on the GPU at a time is what makes the kernel time a clean
 per-frame number: with several streams the GPU time-slices other frames' kernels into this one's

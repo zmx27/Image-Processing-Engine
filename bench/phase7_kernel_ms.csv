@@ -1,0 +1,12 @@
+label,chain,tile,streams,mean_kernel_ms
+phase7_gaussian_naive_streams1,gaussian,naive,1,1.5810
+phase7_gaussian_tile16_streams1,gaussian,16,1,0.8080
+phase7_gaussian_tile32_streams1,gaussian,32,1,0.4750
+phase7_sobel_naive_streams1,sobel,naive,1,0.1460
+phase7_sobel_tile16_streams1,sobel,16,1,0.1510
+phase7_sobel_tile32_streams1,sobel,32,1,0.1510
+phase7_full_naive_streams1,full,naive,1,2.3480
+phase7_full_tile16_streams1,full,16,1,0.9270
+phase7_full_tile32_streams1,full,32,1,0.6170
+phase7_full_naive_streams4,full,naive,4,8.5650
+phase7_full_tile16_streams4,full,16,4,2.5100
