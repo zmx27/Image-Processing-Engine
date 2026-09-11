@@ -1,0 +1,5 @@
+label,connections,window,frames_per_conn,width,height,channels,chains,fps,req_mb_per_s,p50_ms,p99_ms,mean_ms,max_ms,cold_first_ms,failures
+phase6_streams1_full,4,8,300,1024,1024,3,1,263.435,790.306,111.524,202.083,119.831,219.327,71.2911,0
+phase6_streams1_cheap,4,8,300,1024,1024,3,1,590.259,1770.78,52.1748,66.0222,53.3662,67.4346,44.0773,0
+phase6_streams4_full,4,8,300,1024,1024,3,1,310.569,931.707,102.531,129.289,101.49,135.274,53.9127,0
+phase6_streams4_cheap,4,8,300,1024,1024,3,1,551.922,1655.77,56.312,77.8124,57.3093,92.6866,48.4303,0
