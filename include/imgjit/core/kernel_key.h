@@ -35,9 +35,11 @@ struct KernelKey {
   OpChain chain;
   int channels{0};
 
-  // Reserved: defaults are what Phases 2-6 emit. See the enums above.
+  // Phase 7: the stencil kernels' variant. tile_size is the tile edge in pixels, and 0
+  // for naive — codegen refuses a naive key with a size, so one kernel has one key.
   TileVariant tile{TileVariant::kNaive};
   int tile_size{0};
+  // Reserved for Phase 8; the default is what every earlier phase emits.
   ConstantsMode constants{ConstantsMode::kBaked};
 
   friend bool operator==(const KernelKey&, const KernelKey&) = default;

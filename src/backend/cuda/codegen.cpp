@@ -1,6 +1,7 @@
 #include "backend/cuda/codegen.h"
 
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <sstream>
 #include <stdexcept>
@@ -15,6 +16,15 @@ namespace imgjit::cuda {
 namespace {
 
 constexpr const char* kStagePrefix = "imgjit_stage";
+
+// Static __shared__ memory per block that every CUDA device since compute 2.0
+// guarantees. The closed op set's worst case — tile 32 and gaussian:4 (radius 12), so a
+// 56x56 apron, times three colour planes of floats (alpha is never staged) — is 37,632
+// bytes, so no valid key reaches this. It is checked anyway because the failure it
+// prevents is not local: an oversized tile compiles to PTX and only fails when the
+// driver loads the module, which is a CudaError, which is a context recreation on every
+// frame instead of an error naming the tile.
+constexpr std::size_t kMaxStaticSharedBytes = 48 * 1024;
 
 // %.9g is the shortest precision that round-trips every float exactly, so a literal
 // printed here parses back to the bit pattern the oracle computed. That matters most
@@ -166,21 +176,89 @@ int emit_stencil_constants(std::ostringstream& out, const std::string& name, con
   return radius;
 }
 
+// The tiled variant's load phase (docs/PLAN.md Phase 7). The block stages the input for
+// its tile_size x tile_size outputs plus a radius-wide apron on every side: that is
+// (tile_size + 2*radius)^2 samples, more than the block has threads, so thread k loads
+// cells k, k + tile_size^2, k + 2*tile_size^2, ... until the tile is full.
+//
+// The load goes through the stage's tap helper — the naive kernel's own clamped
+// (replicate) load with the prologue folded in — so edge handling is one piece of code
+// in both variants, and the prologue now runs once per staged sample instead of once
+// per tap.
+//
+// The layout is one float plane per colour channel, so consecutive threads read
+// consecutive words. Floats rather than bytes because what is staged is the value
+// AFTER conversion and prologue; storing bytes would put a divide back into every tap.
+void emit_tile_load(std::ostringstream& out, const std::string& name, int radius,
+                    int tile_size, int colors) {
+  const int edge = tile_size + 2 * radius;
+  const std::size_t shared_bytes = static_cast<std::size_t>(colors * edge * edge) * sizeof(float);
+  if (shared_bytes > kMaxStaticSharedBytes) {
+    throw std::invalid_argument("emit_cuda_source: a " + std::to_string(tile_size) +
+                                "-wide tile with a radius-" + std::to_string(radius) +
+                                " apron needs " + std::to_string(shared_bytes) +
+                                " bytes of __shared__ memory, over the 48 KiB static limit");
+  }
+
+  out << "  // " << tile_size << "x" << tile_size << " outputs plus a " << radius
+      << "-pixel apron on every side, staged with the prologue applied.\n"
+      << "  __shared__ float tile[" << colors << "][" << edge << "][" << edge << "];\n"
+      << "  const int tile_x0 = (int)(blockIdx.x * " << tile_size << ") - " << radius << ";\n"
+      << "  const int tile_y0 = (int)(blockIdx.y * " << tile_size << ") - " << radius << ";\n"
+      << "  for (int k = (int)(threadIdx.y * " << tile_size << " + threadIdx.x); k < "
+      << edge * edge << "; k += " << tile_size * tile_size << ") {\n"
+      << "    const int ty = k / " << edge << ";\n"
+      << "    const int tx = k - ty * " << edge << ";\n"
+      << "    float t[" << colors << "];\n"
+      << "    " << name << "_tap(src, tile_x0 + tx, tile_y0 + ty, width, height, t);\n";
+  for (int c = 0; c < colors; ++c) {
+    out << "    tile[" << c << "][ty][tx] = t[" << c << "];\n";
+  }
+  // The barrier comes BEFORE the bounds check, and that order is a correctness rule, not
+  // a style: a thread whose output pixel is past the image edge still owns apron cells,
+  // and a thread that returned early would leave them unloaded and never arrive here.
+  out << "  }\n"
+      << "  // Every thread arrives here, including those whose output pixel is past the\n"
+      << "  // image edge — they still own apron cells. So the bounds check comes after.\n"
+      << "  __syncthreads();\n";
+}
+
+// One neighbour's samples into `t`, at offset (dx, dy) from this thread's pixel. Naive:
+// a clamped global load with the prologue recomputed, once per tap. Tiled: a read out
+// of the staged tile. Everything around this fetch is the same text in both variants,
+// which is what keeps tiling a memory optimization rather than a numerics change.
+void emit_fetch(std::ostringstream& out, const std::string& name, int colors, bool tiled) {
+  out << "      float t[" << colors << "];\n";
+  if (!tiled) {
+    out << "      " << name << "_tap(src, x + dx, y + dy, width, height, t);\n";
+    return;
+  }
+  for (int c = 0; c < colors; ++c) {
+    out << "      t[" << c << "] = tile[" << c << "][ly + dy][lx + dx];\n";
+  }
+}
+
 // The stencil body. Accumulation order matches the oracle exactly: dy outer, dx inner,
 // and the 2D weight formed as (wy * wx) before it multiplies the sample — the oracle's
 // `sum += wy * wx * sample` associates the same way. Only FMA contraction is left to
 // separate them, which is what the <=1 LSB tolerance is for.
 void emit_stencil_body(std::ostringstream& out, const std::string& name, const Op& stencil,
-                       int radius, int colors) {
+                       int radius, int colors, bool tiled) {
   const std::string radius_text = std::to_string(radius);
+
+  if (tiled) {
+    // No clamping from here on: the apron already holds every neighbour, edge-clamped
+    // when it was loaded, so every (lx + dx, ly + dy) below is inside the tile.
+    out << "  const int lx = (int)threadIdx.x + " << radius_text << ";  // this pixel, in tile\n"
+        << "  const int ly = (int)threadIdx.y + " << radius_text << ";  // coordinates\n";
+  }
 
   if (stencil.kind == OpKind::kGaussian) {
     out << "  float acc[" << colors << "] = " << zero_initializer(colors) << ";\n"
         << "  for (int dy = -" << radius_text << "; dy <= " << radius_text << "; ++dy) {\n"
-        << "    for (int dx = -" << radius_text << "; dx <= " << radius_text << "; ++dx) {\n"
-        << "      float t[" << colors << "];\n"
-        << "      " << name << "_tap(src, x + dx, y + dy, width, height, t);\n"
-        << "      const float w = " << name << "_w[dy + " << radius_text << "] * " << name
+        << "    for (int dx = -" << radius_text << "; dx <= " << radius_text << "; ++dx) {\n";
+    emit_fetch(out, name, colors, tiled);
+    out << "      const float w = " << name << "_w[dy + " << radius_text << "] * " << name
         << "_w[dx + " << radius_text << "];\n";
     for (int c = 0; c < colors; ++c) {
       out << "      acc[" << c << "] += w * t[" << c << "];\n";
@@ -195,10 +273,9 @@ void emit_stencil_body(std::ostringstream& out, const std::string& name, const O
   out << "  float gx[" << colors << "] = " << zero_initializer(colors) << ";\n"
       << "  float gy[" << colors << "] = " << zero_initializer(colors) << ";\n"
       << "  for (int dy = -1; dy <= 1; ++dy) {\n"
-      << "    for (int dx = -1; dx <= 1; ++dx) {\n"
-      << "      float t[" << colors << "];\n"
-      << "      " << name << "_tap(src, x + dx, y + dy, width, height, t);\n"
-      << "      const int k = (dy + 1) * 3 + (dx + 1);\n";
+      << "    for (int dx = -1; dx <= 1; ++dx) {\n";
+  emit_fetch(out, name, colors, tiled);
+  out << "      const int k = (dy + 1) * 3 + (dx + 1);\n";
   for (int c = 0; c < colors; ++c) {
     out << "      gx[" << c << "] += " << name << "_gx[k] * t[" << c << "];\n"
         << "      gy[" << c << "] += " << name << "_gy[k] * t[" << c << "];\n";
@@ -210,21 +287,39 @@ void emit_stencil_body(std::ostringstream& out, const std::string& name, const O
   }
 }
 
-void emit_stage(std::ostringstream& out, const std::string& name, const Stage& stage, int channels,
-                int colors) {
+// Returns the block edge the stage must be launched with (GeneratedStage::block_dim).
+// `tile_size` is 0 for the naive variant.
+int emit_stage(std::ostringstream& out, const std::string& name, const Stage& stage, int channels,
+               int colors, int tile_size) {
   int radius = 0;
   if (stage.has_stencil) {
     radius = emit_stencil_constants(out, name, stage.stencil);
     emit_tap_function(out, name, stage, channels, colors);
   }
 
+  // Only a stencil has neighbours to share, so a pointwise-only stage is naive in
+  // either variant.
+  const bool tiled = stage.has_stencil && tile_size > 0;
+  const int block_dim = tiled ? tile_size : kNaiveBlockDim;
+
   // Every stage has the same signature, so the executor can ping-pong two buffers
   // through the whole chain without knowing what any stage does. Dimensions are
   // parameters here and nowhere else — that is CLAUDE.md invariant 4 made structural.
-  out << "\nextern \"C\" __global__ void " << name << "(\n"
+  out << "\nextern \"C\" __global__ void ";
+  if (tiled) {
+    // Caps registers so that tile_size^2 threads always fit on an SM. Without it a 32x32
+    // tile (1024 threads) can compile to more registers than one block may have, and
+    // the launch fails with out-of-resources — a CudaError, so a context recreation on
+    // every frame. Naive stages need no cap: 256 threads fit at any register count.
+    out << "__launch_bounds__(" << block_dim * block_dim << ") ";
+  }
+  out << name << "(\n"
       << "    const unsigned char* __restrict__ src, unsigned char* __restrict__ dst,\n"
-      << "    int width, int height) {\n"
-      << "  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);\n"
+      << "    int width, int height) {\n";
+  if (tiled) {
+    emit_tile_load(out, name, radius, tile_size, colors);
+  }
+  out << "  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);\n"
       << "  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);\n"
       << "  if (x >= width || y >= height) { return; }\n"
       << "  const int i = (y * width + x) * " << channels << ";\n"
@@ -236,7 +331,7 @@ void emit_stage(std::ostringstream& out, const std::string& name, const Stage& s
     }
     emit_pointwise(out, stage.prologue, colors, "v", "  ");
   } else {
-    emit_stencil_body(out, name, stage.stencil, radius, colors);
+    emit_stencil_body(out, name, stage.stencil, radius, colors, tiled);
   }
 
   emit_pointwise(out, stage.epilogue, colors, "v", "  ");
@@ -250,17 +345,28 @@ void emit_stage(std::ostringstream& out, const std::string& name, const Stage& s
     out << "  dst[i + 3] = src[i + 3];  // alpha passes through every op untouched\n";
   }
   out << "}\n";
+  return block_dim;
 }
 
 }  // namespace
+
+bool is_supported_tile(const TileVariant tile, const int tile_size) {
+  if (tile == TileVariant::kNaive) {
+    return tile_size == 0;
+  }
+  return tile == TileVariant::kTiled && tile_size >= 1 && tile_size <= kMaxTileSize;
+}
 
 GeneratedProgram emit_cuda_source(const KernelKey& key) {
   if (!is_supported_channel_count(key.channels)) {
     throw std::invalid_argument("emit_cuda_source: unsupported channel count " +
                                 std::to_string(key.channels));
   }
-  if (key.tile != TileVariant::kNaive) {
-    throw std::invalid_argument("emit_cuda_source: the tiled variant arrives in Phase 7");
+  if (!is_supported_tile(key.tile, key.tile_size)) {
+    throw std::invalid_argument("emit_cuda_source: unsupported tile size " +
+                                std::to_string(key.tile_size) +
+                                " (naive takes 0, tiled takes 1-" + std::to_string(kMaxTileSize) +
+                                ")");
   }
   if (key.constants != ConstantsMode::kBaked) {
     throw std::invalid_argument("emit_cuda_source: parameterized constants arrive in Phase 8");
@@ -268,14 +374,21 @@ GeneratedProgram emit_cuda_source(const KernelKey& key) {
 
   const int colors = cpu::color_channels(key.channels);
   const std::vector<Stage> stages = plan_stages(key.chain);
+  const int tile_size = key.tile == TileVariant::kTiled ? key.tile_size : 0;
 
   std::ostringstream out;
   out << "// Generated by imgjit codegen (src/backend/cuda/codegen.cpp) — do not edit.\n"
       << "// chain:    \"" << canonical_string(key.chain) << "\"\n"
       << "// channels: " << key.channels << " (" << colors << " colour + "
       << (key.channels == 4 ? 1 : 0) << " alpha)\n"
-      << "// stages:   " << stages.size() << "\n"
-      << "//\n"
+      << "// stages:   " << stages.size() << "\n";
+  if (tile_size == 0) {
+    out << "// tile:     naive (every tap is a global load)\n";
+  } else {
+    out << "// tile:     " << tile_size << "x" << tile_size
+        << " shared-memory tile on stencil stages\n";
+  }
+  out << "//\n"
       << "// Width and height are absent from this source by construction: they are\n"
       << "// launch arguments, so one compile serves every resolution (CLAUDE.md\n"
       << "// invariant 4).\n"
@@ -285,8 +398,8 @@ GeneratedProgram emit_cuda_source(const KernelKey& key) {
   program.stages.reserve(stages.size());
   for (std::size_t i = 0; i < stages.size(); ++i) {
     const std::string name = kStagePrefix + std::to_string(i);
-    emit_stage(out, name, stages[i], key.channels, colors);
-    program.stages.push_back({name, stages[i].has_stencil});
+    const int block_dim = emit_stage(out, name, stages[i], key.channels, colors, tile_size);
+    program.stages.push_back({name, stages[i].has_stencil, block_dim});
   }
 
   program.source = out.str();
