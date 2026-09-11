@@ -316,14 +316,14 @@ harness so the comparisons are like-for-like.
 
 ## Phase 6 — Async multi-stream pipeline · env: Colab
 
-**Correctness gates green on Colab (T4); benchmark recorded; one artifact outstanding.**
-`phase6_gpu_async`, `phase6_gpu_stress`, `phase6_gpu_recovery` all pass on the T4, and the
-portable suite is green on macOS in all three trees (plain / ASan / TSan) with invariant 1's grep
-silent. The `--streams 1` vs `--streams 4` benchmark is in `bench/baseline_phase6.csv` and written
-up in `bench/phase6_results.md`: **+18% throughput / −36% p99 on the showcase chain**, occupancy
-mean 2.61 (vs 1.00 serial). **`next:` re-run notebook cell 18 to regenerate `bench/phase6_timeline.png`
-(the `nsys export --type sqlite` path) and paste the overlap % into `phase6_results.md`, then check
-the last box.**
+**Done.** `phase6_gpu_async` and `phase6_gpu_recovery` pass on the T4; `phase6_gpu_stress` passes
+after the `sobel` oracle-tolerance correction (`tests/test_gpu_pipeline.cpp`). Portable suite green
+on macOS in all three trees (plain / ASan / TSan), invariant 1's grep silent. The `--streams 1`
+vs `--streams 4` benchmark is in `bench/baseline_phase6.csv` and written up with the Nsight trace
+in `bench/phase6_results.md`: **+18% throughput / −36% p99 on the showcase chain**, occupancy mean
+2.61 (vs 1.00 serial), 539 ms of copy time overlapped with compute (≈ the whole copy budget),
+83% GPU utilisation. Kernels do not overlap kernels — a 1024² kernel fills the T4, so the win is
+copy/compute overlap and for a compute-bound chain that ceiling is ~the copy fraction.
 
 - [x] In-flight table across K streams (K=4 by default, `--streams` to sweep it); `cuEventRecord`
       + poll-and-retire. `submit()` returns with the frame still on the GPU; `poll_completions()`
@@ -340,8 +340,9 @@ the last box.**
 - [x] Measurably faster than the serial pipeline: `--streams 4` vs `--streams 1` (same binary,
       same harness — the `--streams 1` row *is* the Phase 5 baseline re-measured) is +18%
       throughput and −36% p99 on the showcase chain. Zero checksum drift under stress.
-- [ ] **Artifact:** `bench/phase6_timeline.png` from cell 18 showing H2D/compute/D2H interleaved
-      across streams, plus the sweep-line overlap % — the visual form of the occupancy counter
+- [x] Nsight Systems trace (`bench/phase6_timeline.png`, `bench/phase6_gpu_trace.csv`): H2D and
+      D2H run concurrently with kernels on other streams — 17% of GPU-busy time has ≥2 ops, and
+      that 17% accounts for essentially the entire copy budget being hidden
 
 **The D2H destination has to be pinned, and that is not a micro-optimization.** An async
 device-to-host copy into *pageable* memory is permitted to behave synchronously, and does. Phase 5

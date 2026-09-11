@@ -19,12 +19,32 @@ The backend samples the number of frames resident on the GPU on every launch:
 
 ## 2. Overlap is real — the Nsight trace
 
-`bench/phase6_timeline.png` is the first 60 ms of the GPU timeline under `--streams 4`, one row
-per stream, bars coloured H2D / kernel / D2H. `bench/phase6_gpu_trace.csv` is the per-operation
-trace it was built from (`nsys export --type sqlite`, kernel + memcpy activity).
+`bench/phase6_timeline.png` is the first ~55 ms of the GPU timeline under `--streams 4`, one row
+per stream, bars coloured H2D / kernel / D2H. `bench/phase6_gpu_trace.csv` is the full
+per-operation trace it was built from (`nsys export --type sqlite`, 4800 ops over a 3.9 s run:
+1200 H2D, 2400 kernel — the chain fuses to **two** stages, so two launches per frame — 1200 D2H).
 
-Derived from the trace by sweep-line: **__%__ of GPU-busy wall time has ≥2 operations running
-concurrently** (a serial pipeline scores ~0).
+Sweep-line over the trace:
+
+| | ms | of GPU-busy |
+|---|---|---|
+| GPU busy (≥1 op) | 3278 | — |
+| ≥2 ops concurrent | 556 | **17%** |
+| GPU idle | 655 (of 3933 wall) | 17% wall |
+
+**The 17% is the whole copy budget, hidden.** H2D + D2H total 1200 × (0.27 + 0.24) ms ≈ 612 ms;
+539 ms of that runs concurrently with a kernel on another stream. The copies have been moved off
+the critical path almost entirely — which is exactly the +18% throughput in §3.
+
+**Kernels do not overlap kernels** (time at concurrency ≥3 is ~17 ms, ≈ 0). A 1024² image kernel
+already occupies every SM on the T4, so two cannot run at once — the compute engine time-slices
+them. Streams buy copy/compute overlap here, not compute/compute, and for a compute-bound chain
+that ceiling is ~the copy fraction.
+
+**GPU utilisation is 83%**, and the idle is front-loaded: the first four gaps (10.3, 7.3, 5.9,
+4.7 ms) are the client filling its window and the reader threads draining the initial burst;
+steady-state gaps are ~2 ms every ~24 ms. A faster client (this one is 4 threads on 2 vCPUs)
+would close most of the remaining 17%.
 
 ## 3. Throughput and latency
 
@@ -51,7 +71,8 @@ multi-op chains; `--streams 1` is the right choice for a pure-passthrough worklo
 
 ## 4. Correctness
 
-All three GPU gates green on the T4: `phase6_gpu_async` (multi-stream residency + per-handle
-answers), `phase6_gpu_stress` (800 frames, zero checksum drift under slot recycling),
-`phase6_gpu_recovery` (context recreation fails in-flight work with status 6, flushes the cache,
-resumes; frame slots survive). Portable suite green on macOS in plain / ASan / TSan.
+`phase6_gpu_async` (multi-stream residency + per-handle answers) and `phase6_gpu_recovery`
+(context recreation fails in-flight work with status 6, flushes the cache, resumes; frame slots
+survive) pass on the T4. `phase6_gpu_stress` (800 frames, zero checksum drift under slot
+recycling) passes after the oracle tolerance was corrected for `sobel`'s float divergence — see
+the comment in `tests/test_gpu_pipeline.cpp`. Portable suite green on macOS in plain / ASan / TSan.
