@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "imgjit/backend/cpu/cpu_backend.h"
+#include "imgjit/core/kernel_key.h"
 #include "imgjit/core/op_chain.h"
 #include "imgjit/net/server.h"
 
@@ -50,6 +51,8 @@ void print_usage() {
                "  --backend cpu|cuda    default cpu\n"
                "  --streams <n>         CUDA streams kept in flight (default 4; 1 =\n"
                "                        the Phase 5 synchronous baseline)\n"
+               "  --tile naive|<n>      stencil kernels: naive (default), or tiled through\n"
+               "                        an n x n __shared__ tile, n in 1..32 (cuda only)\n"
                "  --prewarm \"<chain>[@ch]\"  compile a chain at startup; repeatable\n"
                "                        (channels default 3; --backend cuda only)\n"
                "  --slots <n>           frame slots in the pool (default 8)\n"
@@ -100,6 +103,10 @@ int main(int argc, char** argv) {
   // a time), so "measurably faster" is two runs of this binary rather than a comparison
   // against a build that no longer exists.
   std::size_t stream_count = 4;
+  // The Phase 7 A/B axis, the same shape as --streams: naive and tiled are two runs of
+  // this binary, so the comparison never depends on a build that no longer exists.
+  imgjit::TileVariant tile = imgjit::TileVariant::kNaive;
+  [[maybe_unused]] int tile_size = 0;  // read only by the CUDA backend
 
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -109,6 +116,10 @@ int main(int argc, char** argv) {
       backend_name = argv[++i];
     } else if (argument == "--streams" && i + 1 < argc) {
       stream_count = static_cast<std::size_t>(std::atoi(argv[++i]));
+    } else if (argument == "--tile" && i + 1 < argc) {
+      const std::string value = argv[++i];
+      tile = value == "naive" ? imgjit::TileVariant::kNaive : imgjit::TileVariant::kTiled;
+      tile_size = value == "naive" ? 0 : std::atoi(value.c_str());
     } else if (argument == "--prewarm" && i + 1 < argc) {
       PrewarmEntry entry;
       if (!parse_prewarm(argv[++i], entry)) {
@@ -153,6 +164,17 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "imgjit-server: --streams must be at least 1\n");
     return 2;
   }
+  if (tile != imgjit::TileVariant::kNaive && backend_name != "cuda") {
+    std::fprintf(stderr, "imgjit-server: --tile needs --backend cuda (nothing else tiles)\n");
+    return 2;
+  }
+#ifdef IMGJIT_ENABLE_CUDA
+  if (!imgjit::cuda::is_supported_tile(tile, tile_size)) {
+    std::fprintf(stderr, "imgjit-server: --tile must be naive or a tile edge in 1..%d\n",
+                 imgjit::cuda::kMaxTileSize);
+    return 2;
+  }
+#endif
 
   // Runs ON the worker thread, and start() does not return until it has finished — so a
   // missing GPU and a failed prewarm compile both surface as an exception from start()
@@ -162,11 +184,15 @@ int main(int argc, char** argv) {
   };
 #ifdef IMGJIT_ENABLE_CUDA
   if (backend_name == "cuda") {
-    factory = [&prewarm, stream_count] {
-      auto backend = std::make_unique<imgjit::CudaBackend>(0, stream_count);
-      std::printf("imgjit-server: device 0, %s, %zu stream%s\n",
+    factory = [&prewarm, stream_count, tile, tile_size] {
+      auto backend = std::make_unique<imgjit::CudaBackend>(0, stream_count, tile, tile_size);
+      const std::string tile_text =
+          tile == imgjit::TileVariant::kNaive
+              ? std::string("naive")
+              : std::to_string(tile_size) + "x" + std::to_string(tile_size) + " tiled";
+      std::printf("imgjit-server: device 0, %s, %zu stream%s, %s stencils\n",
                   backend->context().compute_arch().c_str(), backend->stream_count(),
-                  backend->stream_count() == 1 ? "" : "s");
+                  backend->stream_count() == 1 ? "" : "s", tile_text.c_str());
       if (!prewarm.empty()) {
         const auto started = std::chrono::steady_clock::now();
         for (const PrewarmEntry& entry : prewarm) {
@@ -211,13 +237,16 @@ int main(int argc, char** argv) {
     // on its way out (docs/PLAN.md Phase 6, "instrument queue depth, occupancy, stall
     // counts"). mean_in_flight near 1.0 with --streams 4 means the pipeline serialized
     // and the streams bought nothing, whatever the throughput number says.
+    //
+    // The mean kernel time is Phase 7's instrument, and a clean per-frame number only
+    // under --streams 1 (imgjit/backend/backend.h).
     const imgjit::BackendStats stats = server.backend_stats();
     std::printf("imgjit-server: streams — mean in flight %.2f, peak %llu, %llu submit stalls, "
-                "%llu context recreation%s\n",
+                "%llu context recreation%s, mean kernel %.3f ms\n",
                 stats.mean_in_flight, static_cast<unsigned long long>(stats.max_in_flight),
                 static_cast<unsigned long long>(stats.submit_stalls),
                 static_cast<unsigned long long>(stats.context_recreations),
-                stats.context_recreations == 1 ? "" : "s");
+                stats.context_recreations == 1 ? "" : "s", stats.mean_kernel_ms);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "imgjit-server: %s\n", error.what());
