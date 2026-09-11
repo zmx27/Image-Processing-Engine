@@ -10,6 +10,7 @@
 // dependent leaked into the source.
 
 #include <cstdio>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -26,6 +27,7 @@ using imgjit::parse_op_chain;
 using imgjit::TileVariant;
 using imgjit::cuda::emit_cuda_source;
 using imgjit::cuda::GeneratedProgram;
+using imgjit::cuda::kNaiveBlockDim;
 
 namespace {
 
@@ -40,6 +42,13 @@ KernelKey key_for(std::string_view chain, int channels = 3) {
 
 GeneratedProgram emit(std::string_view chain, int channels = 3) {
   return emit_cuda_source(key_for(chain, channels));
+}
+
+GeneratedProgram emit_tiled(std::string_view chain, int tile_size, int channels = 3) {
+  KernelKey key = key_for(chain, channels);
+  key.tile = TileVariant::kTiled;
+  key.tile_size = tile_size;
+  return emit_cuda_source(key);
 }
 
 bool contains(const std::string& haystack, std::string_view needle) {
@@ -65,6 +74,24 @@ std::string literal(float value) {
     printed += ".0";
   }
   return printed + "f";
+}
+
+// A single-stencil kernel's arithmetic: everything from its accumulator declaration to
+// its first store, minus the lines that fetch a neighbour. What is left is exactly what
+// the two tile variants must share.
+std::string arithmetic_of(const std::string& source, std::string_view accumulator) {
+  const std::size_t begin = source.find(accumulator);
+  const std::size_t end = source.find("dst[i + 0]", begin);
+  REQUIRE(begin != std::string::npos);
+  REQUIRE(end != std::string::npos);
+  std::istringstream lines(source.substr(begin, end - begin));
+  std::string kept;
+  for (std::string line; std::getline(lines, line);) {
+    if (!contains(line, "_tap(src, x + dx") && !contains(line, "= tile[")) {
+      kept += line + "\n";
+    }
+  }
+  return kept;
 }
 
 }  // namespace
@@ -240,15 +267,22 @@ TEST_CASE("the prelude's luma constants have not drifted from the oracle's", "[c
   CHECK(imgjit::cpu::kLumaBlue == 0.114F);
 }
 
-TEST_CASE("variants reserved for later phases are refused, not silently ignored",
-          "[codegen]") {
+TEST_CASE("keys codegen cannot emit are refused, not silently ignored", "[codegen]") {
   // A key field codegen ignores is worse than one it rejects: the cache would hand
   // back the naive kernel for a tiled request and the benchmark would report a
   // speedup of exactly zero, with nothing to show why.
-  KernelKey tiled = key_for("sobel");
-  tiled.tile = TileVariant::kTiled;
-  tiled.tile_size = 16;
-  CHECK_THROWS_AS(emit_cuda_source(tiled), std::invalid_argument);
+  //
+  // Naive with a size would be two keys for one kernel; tiled with no size, or with
+  // more than 32x32 = 1024 threads per block, is not a kernel that can launch.
+  KernelKey sized_naive = key_for("sobel");
+  sized_naive.tile_size = 16;
+  CHECK_THROWS_AS(emit_cuda_source(sized_naive), std::invalid_argument);
+  for (const int size : {0, -1, imgjit::cuda::kMaxTileSize + 1}) {
+    CAPTURE(size);
+    CHECK_THROWS_AS(emit_tiled("sobel", size), std::invalid_argument);
+  }
+  CHECK_NOTHROW(emit_tiled("sobel", 1));
+  CHECK_NOTHROW(emit_tiled("sobel", imgjit::cuda::kMaxTileSize));
 
   KernelKey parameterized = key_for("sobel");
   parameterized.constants = ConstantsMode::kParameterized;
@@ -257,4 +291,130 @@ TEST_CASE("variants reserved for later phases are refused, not silently ignored"
   KernelKey two_channel = key_for("sobel");
   two_channel.channels = 2;
   CHECK_THROWS_AS(emit_cuda_source(two_channel), std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------------------
+// Phase 7: the tiled variant. Like everything above, these assert the text of the kernel
+// and so run on a Mac. What they pin down is the structure a wrong answer on Colab would
+// be hardest to attribute: the apron's size and origin, who calls the tap helper, and
+// the order of the barrier and the bounds check.
+// ---------------------------------------------------------------------------------------
+
+TEST_CASE("naive stages launch at the naive block and share nothing", "[codegen]") {
+  const GeneratedProgram program = emit("grayscale,gaussian:1.4,sobel,invert");
+  for (const auto& stage : program.stages) {
+    CHECK(stage.block_dim == kNaiveBlockDim);
+  }
+  CHECK_FALSE(contains(program.source, "__shared__"));
+  CHECK_FALSE(contains(program.source, "__syncthreads"));
+  CHECK_FALSE(contains(program.source, "__launch_bounds__"));
+}
+
+TEST_CASE("a tiled stencil stages its input through a __shared__ tile with an apron",
+          "[codegen]") {
+  // gaussian:1.4 is radius 5, so a 16x16 tile of outputs needs 16 + 2*5 = 26 input
+  // samples per side: 676 cells for 256 threads, so each thread loads every 256th.
+  const GeneratedProgram program = emit_tiled("gaussian:1.4", 16);
+  REQUIRE(program.stages.size() == 1);
+  CHECK(program.stages.front().block_dim == 16);
+  CHECK(contains(program.source, "__launch_bounds__(256) imgjit_stage0("));
+  CHECK(contains(program.source, "__shared__ float tile[3][26][26];"));
+  CHECK(contains(program.source, "k < 676; k += 256)"));
+
+  // The apron starts one radius up and to the left of the block's first output pixel.
+  CHECK(contains(program.source, "tile_x0 = (int)(blockIdx.x * 16) - 5;"));
+  CHECK(contains(program.source, "tile_y0 = (int)(blockIdx.y * 16) - 5;"));
+
+  // Taps read the tile; the load is now the tap helper's only caller, which is where the
+  // edge clamping and the prologue happen — once per staged sample.
+  CHECK(contains(program.source, "t[2] = tile[2][ly + dy][lx + dx];"));
+  CHECK_FALSE(contains(program.source, "_tap(src, x + dx, y + dy"));
+  CHECK(count_of(program.source, "imgjit_stage0_tap(src, tile_x0 + tx, tile_y0 + ty,") == 1);
+}
+
+TEST_CASE("every thread reaches the barrier before any thread bounds-checks", "[codegen]") {
+  // The classic tiling bug. A thread whose output pixel is past the image edge still
+  // owns apron cells; if it returned before the barrier those cells would never be
+  // loaded, and __syncthreads() would be waiting on a thread that is gone. Checked per
+  // kernel, since a chain with two stencils has two barriers.
+  for (const std::string_view chain :
+       {"gaussian:1.4", "sobel", "grayscale,gaussian:1.4,invert,sobel,threshold:0.3"}) {
+    CAPTURE(chain);
+    const std::string source = emit_tiled(chain, 16).source;
+    std::size_t kernels = 0;
+    for (std::size_t at = source.find("__launch_bounds__"); at != std::string::npos;
+         at = source.find("__launch_bounds__", at + 1)) {
+      ++kernels;
+      const std::size_t barrier = source.find("__syncthreads();", at);
+      const std::size_t bounds = source.find("if (x >= width || y >= height)", at);
+      REQUIRE(barrier != std::string::npos);
+      REQUIRE(bounds != std::string::npos);
+      CHECK(barrier < bounds);
+    }
+    CHECK(kernels == count_of(source, "__syncthreads();"));
+    CHECK(kernels == emit_tiled(chain, 16).stages.size());
+  }
+}
+
+TEST_CASE("the tile size is baked into the kernel", "[codegen]") {
+  // CLAUDE.md invariant 4 from the codegen end. The tile edge sizes the __shared__ array
+  // and the launch bound, so two sizes are two kernels — which is why tile_size, and not
+  // just a naive|tiled flag, is in KernelKey (test_kernel_key.cpp asserts that side).
+  const std::string small = emit_tiled("sobel", 8).source;
+  const std::string large = emit_tiled("sobel", 32).source;
+  CHECK(contains(small, "__shared__ float tile[3][10][10];"));
+  CHECK(contains(small, "__launch_bounds__(64)"));
+  CHECK(contains(large, "__shared__ float tile[3][34][34];"));
+  CHECK(contains(large, "__launch_bounds__(1024)"));
+  CHECK(small != large);
+  CHECK(small != emit("sobel").source);
+}
+
+TEST_CASE("the widest apron the op set allows fits in shared memory", "[codegen]") {
+  // gaussian:4 is radius 12, so at tile 32 the apron is 56 per side. Alpha is never
+  // staged, so 4 channels is 3 planes: 3 * 56 * 56 * 4 bytes = 37,632, under the 48 KiB
+  // of static shared memory every device guarantees.
+  CHECK(contains(emit_tiled("gaussian:4", 32, 4).source, "__shared__ float tile[3][56][56];"));
+
+  // And an apron WIDER than the tile — radius 12 around 8 — is loaded by the same
+  // strided loop, just more times per thread: 32 * 32 cells over 64 threads.
+  const std::string narrow = emit_tiled("gaussian:4", 8, 1).source;
+  CHECK(contains(narrow, "__shared__ float tile[1][32][32];"));
+  CHECK(contains(narrow, "k < 1024; k += 64)"));
+}
+
+TEST_CASE("only stencil stages are tiled", "[codegen]") {
+  // A pointwise stage reads one sample per output; there is nothing to share.
+  const GeneratedProgram pointwise = emit_tiled("grayscale,invert", 32);
+  REQUIRE(pointwise.stages.size() == 1);
+  CHECK(pointwise.stages.front().block_dim == kNaiveBlockDim);
+  CHECK_FALSE(contains(pointwise.source, "__shared__"));
+
+  // Two stencils, two tiled stages, each with its own apron: radius 5, then radius 1.
+  const GeneratedProgram chain = emit_tiled("grayscale,gaussian:1.4,sobel,threshold:0.3", 16);
+  REQUIRE(chain.stages.size() == 2);
+  for (const auto& stage : chain.stages) {
+    CHECK(stage.block_dim == 16);
+  }
+  CHECK(contains(chain.source, "__shared__ float tile[3][26][26];"));
+  CHECK(contains(chain.source, "__shared__ float tile[3][18][18];"));
+}
+
+TEST_CASE("tiling changes where operands come from, never the arithmetic", "[codegen]") {
+  // The tiled kernel must be a memory optimization in the same sense fusion is
+  // (docs/ARCHITECTURE.md decision 5): with the fetch lines taken out, the stencil,
+  // the epilogue and the store are the same text in both variants. This is what makes
+  // "tiled matches naive" an expectation of equality rather than of a tolerance.
+  for (const std::string_view chain : {"grayscale,gaussian:1.4,invert", "sobel,threshold:0.5"}) {
+    CAPTURE(chain);
+    const std::string accumulator =
+        chain.find("gaussian") != std::string_view::npos ? "float acc[" : "float gx[";
+    const std::string naive = arithmetic_of(emit(chain).source, accumulator);
+    const std::string tiled = arithmetic_of(emit_tiled(chain, 16).source, accumulator);
+    CHECK_FALSE(naive.empty());
+    CHECK(naive == tiled);
+  }
+
+  // Alpha still comes from the centre pixel in global memory, not from the tile.
+  CHECK(contains(emit_tiled("sobel", 16, 4).source, "dst[i + 3] = src[i + 3];"));
 }
