@@ -397,6 +397,14 @@ project. Build them destroyable-as-a-unit now; Phase 8 only injects the fault an
 
 ## Phase 7 — Shared-memory tiling · env: Colab
 
+**Status — implemented, awaiting Colab (next:).** Tiled codegen, the key/launch plumbing,
+`--tile` on `imgjit-server` / `imgjit-cli`, and the kernel-time instrument are in. Locally: the
+portable suite is green, invariant 1's grep is silent, and a host simulation of the generated
+kernels (each block on real threads with a real barrier) came out bit-identical to naive for all
+144 tiled corpus runs at tile 8/16/32 and within 1 LSB of the oracle. That proves the index
+arithmetic, not NVRTC or the driver. Remaining: `phase7_gpu_tiling` on the T4, then notebook cell
+20 → `bench/baseline_phase7.csv` + `bench/phase7_kernel_ms.csv`, then tick the boxes below.
+
 - [ ] Tiled stencil codegen variant: `__shared__` tile + halo/apron loads, bounds-clamped,
       parameterized by tile size
 - [ ] Extend `KernelKey` with the naive|tiled variant **and the tile size** — the tile dimensions
@@ -404,6 +412,31 @@ project. Build them destroyable-as-a-unit now; Phase 8 only injects the fault an
       kernels onto one key; both variants remain runtime-selectable
 - **Done when:** tiled output matches naive and CPU within tolerance, and is measurably faster on
       both Gaussian and Sobel
+
+**What is staged is the sample after the prologue, which is half the win.** The naive kernel
+re-loads, re-converts (`/255`) and re-runs any fused prologue at every tap of every pixel —
+121 times per sample for `gaussian:1.4`. The tiled load goes through the naive kernel's own tap
+helper, once per staged sample, so edge clamping and prologue folding stay one piece of code and
+the per-tap work becomes a shared-memory read. The accumulation around the fetch is the same
+text in both variants (`test_codegen.cpp` asserts it), so tiling changes where operands come
+from and never the arithmetic — tiled is expected to equal naive exactly, not merely within 1 LSB.
+
+**The barrier comes before the bounds check.** A thread whose output pixel is past the image edge
+still owns apron cells; returning early would leave them unloaded and strand the other threads at
+`__syncthreads()`. The naive kernel's early return is correct only because it has no barrier.
+
+**The launch shape is codegen's output, not the executor's choice.** A tiled stage's `__shared__`
+array and index arithmetic are baked for exactly `tile_size` threads per side, so the block edge
+travels with the program (`GeneratedStage::block_dim`) instead of being a constant in the backend
+that could drift from it. Tiled stages also carry `__launch_bounds__(tile_size²)`: at tile 32 that
+is 1024 threads, and without the cap the compiler may assign more registers than a block can hold,
+which fails the launch — a `CudaError`, so a context recreation on every frame.
+
+**The gate is kernel time, not FPS.** A 3×3 sobel is a sliver of a copy- and host-bound frame, so
+end-to-end throughput cannot show it getting faster — the same problem Phase 6 had with overlap,
+and the same answer: an instrument. `BackendStats::mean_kernel_ms` is read off two timing events
+around the stages, excluding copies and compile, and is a clean per-frame number at `--streams 1`
+(see `bench/README.md`).
 
 ## Phase 8 — Benchmarks + polish · env: Colab
 

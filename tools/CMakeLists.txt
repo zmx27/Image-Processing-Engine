@@ -14,6 +14,16 @@ add_test(
           "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
           "${CMAKE_CURRENT_BINARY_DIR}/checkerboard_grayscale_sobel.png")
 
+# Phase 7, portable half: --tile from the flag through codegen to a dumped kernel, on a
+# machine with no GPU. Whether that kernel computes the right thing is
+# imgjit-gpu-tests [tiling]'s job.
+add_test(
+  NAME phase7_cli_dump_tiled_source
+  COMMAND imgjit-cli --ops "grayscale,gaussian:1.4,sobel" --tile 16
+          --dump-source "${CMAKE_CURRENT_BINARY_DIR}/phase7_tiled_chain.cu"
+          "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
+          "${CMAKE_CURRENT_BINARY_DIR}/checkerboard_phase7_cpu.png")
+
 # Phase 4 (docs/PLAN.md, Track N): the server and the reference client. Both are
 # portable — the whole network layer is proven against the CPU backend on a Mac, so a
 # bug found here is never confused with a CUDA bug. Phase 5 adds `--backend cuda`,
@@ -58,6 +68,16 @@ add_test(
           --dump-ptx "${CMAKE_CURRENT_BINARY_DIR}/phase3_chain.ptx"
           "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
           "${CMAKE_CURRENT_BINARY_DIR}/checkerboard_phase3.png")
+
+# Phase 7: the same chain through the tiled variant on the GPU, dumping the source and PTX
+# that were actually compiled — the __shared__ tile is the thing to read in them.
+add_test(
+  NAME phase7_cli_cuda_tiled
+  COMMAND imgjit-cli --backend cuda --tile 16 --ops "grayscale,gaussian:1.4,sobel" --repeat 3
+          --dump-source "${CMAKE_CURRENT_BINARY_DIR}/phase7_tiled_chain_cuda.cu"
+          --dump-ptx "${CMAKE_CURRENT_BINARY_DIR}/phase7_tiled_chain.ptx"
+          "${CMAKE_SOURCE_DIR}/tests/testdata/checkerboard_16x16_rgb.png"
+          "${CMAKE_CURRENT_BINARY_DIR}/checkerboard_phase7.png")
 
 # Phase 1a: PTX produced ahead of time by nvcc, so the driver path can be proven
 # with JIT out of the picture. Deliberately an add_custom_command rather than

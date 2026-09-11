@@ -65,3 +65,7 @@ add_test(NAME phase5_gpu_server COMMAND imgjit-gpu-tests "[gpu-server]")
 add_test(NAME phase6_gpu_async COMMAND imgjit-gpu-tests "[async]")
 add_test(NAME phase6_gpu_stress COMMAND imgjit-gpu-tests "[stress]")
 add_test(NAME phase6_gpu_recovery COMMAND imgjit-gpu-tests "[recovery]")
+
+# Phase 7: the tiled variant against the CPU oracle and against the naive kernel, at
+# several tile sizes, plus the tile half of the kernel identity.
+add_test(NAME phase7_gpu_tiling COMMAND imgjit-gpu-tests "[tiling]")

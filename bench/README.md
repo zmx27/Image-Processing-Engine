@@ -81,6 +81,38 @@ The timeline must show H2D, kernel and D2H rows genuinely interleaved across str
 file of segments with gaps between them. If `nsys` is unavailable (some Colab images ship without
 it), the occupancy counter carries the claim and the timeline is produced later on any GPU box.
 
+## Recording the Phase 7 comparison
+
+Phase 7 added the tiled stencil variant. The A/B is again two runs of one server binary, differing
+only in `--tile`:
+
+    ./build/tools/imgjit-server --port 9000 --backend cuda --streams 1 --tile naive \
+        --slots 32 --slots-per-conn 8 --queue 32 --max-payload 16777216 \
+        --prewarm "gaussian:1.4" &
+
+    ./build/bench/imgjit-bench --port 9000 --connections 4 --window 8 --frames 300 --no-echo \
+        --width 1024 --height 1024 --channels 3 --ops "gaussian:1.4" \
+        --label phase7_gaussian_naive_streams1 --csv bench/baseline_phase7.csv
+
+Then `--tile 16` and `--tile 32`, and the same three for `--ops sobel` and the showcase chain.
+`--prewarm` warms the variant the server was started with — the tile is part of the kernel key.
+Cell 20 of `colab/run.ipynb` runs the whole matrix and writes both files below.
+
+**The number the gate turns on is the server's `mean kernel`, not the CSV's `fps`.** It is read
+off the GPU's own clock — a timing event either side of the stages — so it contains the kernels
+and nothing else: no PCIe copy, no host work, no NVRTC compile. That distinction is the whole
+reason it exists. A 3×3 `sobel` over 1024² is a sliver of a frame whose end-to-end cost is
+dominated by copies and the worker's host work (Phase 6 measured ~1.7 ms/frame for a trivial
+chain), so a tiled sobel can be much faster and leave `fps` where it was. The notebook cell
+collects the kernel times into `bench/phase7_kernel_ms.csv`, keyed by the same labels.
+
+**`--streams 1` on purpose.** One frame on the GPU at a time is what makes the kernel time a clean
+per-frame number: with several streams the GPU time-slices other frames' kernels into this one's
+window (Phase 6: kernels do not overlap kernels on a full-size image), and the number includes
+the wait. The two extra rows — the showcase chain, naive vs tile 16, at `--streams 4` — are the
+end-to-end view: what tiling is worth on top of the Phase 6 pipeline, where the compute engine is
+the bottleneck and a faster kernel should show up in `fps` directly.
+
 ## Reading the columns
 
 | Column | Meaning |
