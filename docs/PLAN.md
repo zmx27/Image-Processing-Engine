@@ -186,7 +186,7 @@ Phase 8's A/B axis. Both are already reserved in the key as of Phase 2.
 
 | Field | Since | Why it is a codegen input |
 |---|---|---|
-| canonical `OpChain` (kinds + quantized params, in order) | 2 | the emitted stages, their fusion boundaries and every baked literal |
+| canonical `OpChain` (kinds + quantized params, in order) | 2 | the emitted stages, their fusion boundaries and every baked literal. **Params only when `constants` is baked** — parameterized kernels take them as launch arguments, so there they are not codegen inputs and leave the key |
 | `channels` | 2 | baked as a literal; changes indexing and which channels the op touches |
 | `tile` (naive\|tiled) | 7 (reserved in 2) | a different kernel body |
 | `tile_size` | 7 (reserved in 2) | baked into the `__shared__` array dimensions |
@@ -459,6 +459,9 @@ around the stages, excluding copies and compile, and is a clean per-frame number
 
 ## Phase 8 — Benchmarks + polish · env: Colab
 
+- [ ] Parameterized-constants codegen — the one new kernel variant this phase needs before
+      its A/B can be measured. Implemented (`--constants parameterized` on `imgjit-server` /
+      `imgjit-cli`), portable tests green; **next:** run `phase8_gpu_constants` on Colab
 - [ ] `bench/` CSV harness — widens the Phase 5 timing harness over the orthogonal matrix:
       naive|tiled × sync|async, plus fused-vs-unfused chain, cold-vs-warm cache,
       baked-vs-parameterized constants (the constants mode must already be a `KernelKey` input —
@@ -468,6 +471,25 @@ around the stages, excluding copies and compile, and is a clean per-frame number
       context recreation holds under fault, and that the server survives
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
 - **Done when:** every architectural claim in `ARCHITECTURE.md` maps to a number in the table
+
+**Parameterized means the gaussian's radius and weights, `brightness` and `threshold` become
+kernel arguments; the channel count and sobel's 3x3 stay literals.** Those two are the
+kernel's shape, not values a client picks. The weights travel by value as one
+`kMaxGaussianTaps` (25) float struct — kernel arguments have a compile-time size — so they
+sit in the parameter bank rather than behind a per-frame upload, and the A/B measures
+unrolling and constant folding, not an extra copy.
+
+**Parameter values leave the key in parameterized mode.** Invariant 4 is "every codegen input,
+and nothing else", and there they are not codegen inputs: `gaussian:1.4` and `gaussian:3` are
+one compile. The cost is that the launch must take its values from the frame's chain and never
+from the key — the cached kernel holds whichever frame compiled it — and the GPU test diffs
+each of several parameter values against the oracle to prove it does.
+
+**Parameterized is naive-only.** A tiled stage sizes its `__shared__` array from the radius
+at compile time, which a parameterized kernel does not know until launch. Dynamic shared
+memory would lift that at the cost of reworking Phase 7's verified tile indexing; the plan
+lists baked-vs-parameterized as its own axis rather than crossed with tiling, so the
+combination is refused at startup instead, like a bad `--tile`.
 
 ## Stretch (explicitly not required for the three pillars)
 
