@@ -459,14 +459,26 @@ around the stages, excluding copies and compile, and is a clean per-frame number
 
 ## Phase 8 — Benchmarks + polish · env: Colab
 
-- [ ] Parameterized-constants codegen — the one new kernel variant this phase needs before
-      its A/B can be measured. Implemented (`--constants parameterized` on `imgjit-server` /
-      `imgjit-cli`), portable tests green; **next:** run `phase8_gpu_constants` on Colab
+- [x] Parameterized-constants codegen — the one new kernel variant this phase needs before
+      its A/B can be measured. `--constants parameterized` on `imgjit-server` / `imgjit-cli`;
+      `phase8_gpu_constants` verified on Colab (T4, 8.16s): parameterized kernels match the
+      CPU oracle, match the baked kernel's own output, and one compile serves several
+      parameter values. Portable suite green, invariant 1's grep silent.
 - [ ] `bench/` CSV harness — widens the Phase 5 timing harness over the orthogonal matrix:
       naive|tiled × sync|async, plus fused-vs-unfused chain, cold-vs-warm cache,
       baked-vs-parameterized constants (the constants mode must already be a `KernelKey` input —
       see Phase 3, or the parameterized run silently reuses the baked kernel)
 - [ ] Sweep 512² → 4K and chain lengths; report FPS, GB/s, p50/p99 round-trip latency
+
+      Both of the above are **written and locally dry-run, not yet recorded**: cell 21 of
+      `colab/run.ipynb` runs six focused sweeps (one axis each, the rest pinned — a cartesian
+      product of six axes is hundreds of runs and no clearer) and writes `baseline_phase8.csv`
+      plus `phase8_matrix.csv`, the latter joining each row to the server configuration and the
+      two server-side instruments so the README table needs no label decoding. `BackendStats`
+      gained `jit_compiles` for this: the compile count was only ever printed at prewarm time,
+      and the cold-vs-warm and constants axes are both read off it after a run. (Named for the
+      technique, not the compiler — `nvrtc` in a portable header trips invariant 1's grep.)
+      **Next:** run that cell on Colab and commit the two CSVs.
 - [ ] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
       context recreation holds under fault, and that the server survives
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
