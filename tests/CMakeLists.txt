@@ -46,6 +46,7 @@ endif()
 # recreation.
 add_executable(imgjit-gpu-tests
   test_cuda_backend.cpp
+  test_gpu_faults.cpp
   test_gpu_pipeline.cpp
   test_gpu_server.cpp)
 # imgjit_cpu is not listed here: imgjit_cuda -> imgjit_codegen -> imgjit_cpu is all
@@ -73,3 +74,10 @@ add_test(NAME phase7_gpu_tiling COMMAND imgjit-gpu-tests "[tiling]")
 # Phase 8: parameterized constants against the CPU oracle and the baked kernel, plus
 # the one-compile-per-shape claim that taking the values out of the key makes.
 add_test(NAME phase8_gpu_constants COMMAND imgjit-gpu-tests "[constants]")
+
+# Phase 8's error-injection pass, kept apart from [recovery] because it asserts something
+# stronger: a REAL sticky driver error (a null-pointer store from a kernel), not a call to
+# recreate_context(), and malformed protocol frames against a GPU-backed server rather
+# than the CPU one. "The server survives" is the claim under test, so a failure here
+# should never be confused with a pipeline bug.
+add_test(NAME phase8_gpu_faults COMMAND imgjit-gpu-tests "[faults]")

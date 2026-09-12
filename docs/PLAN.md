@@ -520,6 +520,12 @@ around the stages, excluding copies and compile, and is a clean per-frame number
       did not retest Sobel tiling).
 - [ ] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
       context recreation holds under fault, and that the server survives
+
+      **Written (`tests/test_gpu_faults.cpp`, ctest case `phase8_gpu_faults`); awaiting the
+      Colab run.** Three cases: a real illegal access recovered from at the backend, malformed
+      frames answered without the GPU hearing about them, and a driver fault under a live
+      server. Locally: syntax-checked against stub driver headers with `-Wall -Wextra`, portable
+      suite green, invariant 1's grep silent.
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
 - **Done when:** every architectural claim in `ARCHITECTURE.md` maps to a number in the table
 
@@ -552,6 +558,25 @@ number behind it. `ARCHITECTURE.md`'s unconditional framing of fusion is qualifi
 The obvious follow-up — emit a prologue as its own pointwise kernel once the following stencil's
 radius is large enough — is **not** taken: it is a codegen change with its own correctness
 surface, and the op set and fusion plan were settled in Phase 2. Recorded, not scheduled.
+
+**The fault has to be real, which is what makes this pass different from Phase 6's `[recovery]`.**
+Those cases call `recreate_context()` and feed the backend a null-input job; neither produces a
+*sticky driver error*, which is the only state recovery actually exists for and the one that
+cannot be reached by asking politely. `tests/test_gpu_faults.cpp` injects a null-pointer store
+from a kernel — device address 0 is never mapped, so it is a genuine
+`CUDA_ERROR_ILLEGAL_ADDRESS` on any device — and asserts the injection returned an error before
+asserting anything about recovery, so an injection that quietly did nothing fails the test
+instead of making every later assertion pass vacuously.
+
+**Faulting a *running server* without breaking invariant 1 needed a specific trick.** The server
+owns its backend on the worker thread, so reaching in from the test thread to poison the context
+would be exactly the violation invariant 1 exists to prevent. But `IBackend::submit()` is already
+called on the worker thread — so a test-only decorator around `CudaBackend` can inject the fault
+from inside `submit()`, legally, with the test thread only ever flipping an atomic. **No
+production code carries a test hook**, and the alternative (a debug flag on the server) was
+rejected for that reason. The malformed-protocol half runs against a GPU-backed server rather
+than Phase 4's CPU one, and its load-bearing assertion is `context_recreations == 0`: a protocol
+error must be rejected in the network layer and never become a GPU event.
 
 ## Stretch (explicitly not required for the three pillars)
 
