@@ -69,3 +69,7 @@ add_test(NAME phase6_gpu_recovery COMMAND imgjit-gpu-tests "[recovery]")
 # Phase 7: the tiled variant against the CPU oracle and against the naive kernel, at
 # several tile sizes, plus the tile half of the kernel identity.
 add_test(NAME phase7_gpu_tiling COMMAND imgjit-gpu-tests "[tiling]")
+
+# Phase 8: parameterized constants against the CPU oracle and the baked kernel, plus
+# the one-compile-per-shape claim that taking the values out of the key makes.
+add_test(NAME phase8_gpu_constants COMMAND imgjit-gpu-tests "[constants]")

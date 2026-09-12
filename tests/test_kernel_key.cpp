@@ -84,6 +84,29 @@ TEST_CASE("every codegen input changes the key", "[core]") {
   distinct(parameterized);
 }
 
+TEST_CASE("a parameterized key is the chain's shape, not its values", "[core]") {
+  // Phase 8. A parameterized kernel reads every op parameter from a launch argument, so
+  // the values are not codegen inputs and invariant 4's "nothing else" takes them out of
+  // the key: one compile serves every sigma. Kinds, order and every other field count.
+  const auto parameterized = [](std::string_view chain, int channels = 3) {
+    KernelKey key = key_for(chain, channels);
+    key.constants = ConstantsMode::kParameterized;
+    return key;
+  };
+  const KernelKey base = parameterized("brightness:0.1,gaussian:1.4,threshold:0.3");
+  const KernelKey other_values = parameterized("brightness:-0.5,gaussian:3,threshold:0.9");
+  CHECK(base == other_values);
+  CHECK(hash_kernel_key(base) == hash_kernel_key(other_values));
+
+  CHECK_FALSE(base == parameterized("brightness:0.1,threshold:0.3,gaussian:1.4"));  // order
+  CHECK_FALSE(base == parameterized("invert,gaussian:1.4,threshold:0.3"));          // kind
+  CHECK_FALSE(base == parameterized("brightness:0.1,gaussian:1.4,threshold:0.3", 4));
+  CHECK_FALSE(base == key_for("brightness:0.1,gaussian:1.4,threshold:0.3"));  // mode
+
+  // Baked keys are untouched by this: there the values are literals, so they still count.
+  CHECK_FALSE(key_for("gaussian:1.4") == key_for("gaussian:3"));
+}
+
 TEST_CASE("an empty chain hashes stably", "[core]") {
   CHECK(hash_kernel_key(key_for("")) == hash_kernel_key(key_for("")));
   CHECK(hash_kernel_key(key_for("")) != hash_kernel_key(key_for("invert")));

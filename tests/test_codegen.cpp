@@ -44,6 +44,12 @@ GeneratedProgram emit(std::string_view chain, int channels = 3) {
   return emit_cuda_source(key_for(chain, channels));
 }
 
+GeneratedProgram emit_parameterized(std::string_view chain, int channels = 3) {
+  KernelKey key = key_for(chain, channels);
+  key.constants = ConstantsMode::kParameterized;
+  return emit_cuda_source(key);
+}
+
 GeneratedProgram emit_tiled(std::string_view chain, int tile_size, int channels = 3) {
   KernelKey key = key_for(chain, channels);
   key.tile = TileVariant::kTiled;
@@ -284,9 +290,13 @@ TEST_CASE("keys codegen cannot emit are refused, not silently ignored", "[codege
   CHECK_NOTHROW(emit_tiled("sobel", 1));
   CHECK_NOTHROW(emit_tiled("sobel", imgjit::cuda::kMaxTileSize));
 
-  KernelKey parameterized = key_for("sobel");
-  parameterized.constants = ConstantsMode::kParameterized;
-  CHECK_THROWS_AS(emit_cuda_source(parameterized), std::invalid_argument);
+  // Parameterized is naive-only: a tiled stage sizes its __shared__ array from the
+  // stencil radius, which a parameterized kernel only learns at launch.
+  KernelKey parameterized_tiled = key_for("sobel");
+  parameterized_tiled.tile = TileVariant::kTiled;
+  parameterized_tiled.tile_size = 16;
+  parameterized_tiled.constants = ConstantsMode::kParameterized;
+  CHECK_THROWS_AS(emit_cuda_source(parameterized_tiled), std::invalid_argument);
 
   KernelKey two_channel = key_for("sobel");
   two_channel.channels = 2;
@@ -417,4 +427,95 @@ TEST_CASE("tiling changes where operands come from, never the arithmetic", "[cod
 
   // Alpha still comes from the centre pixel in global memory, not from the tile.
   CHECK(contains(emit_tiled("sobel", 16, 4).source, "dst[i + 3] = src[i + 3];"));
+}
+
+// ---------------------------------------------------------------------------------------
+// Phase 8: parameterized constants. The same kernels with every op parameter read from a
+// launch argument. What these pin down is that no value leaks into the source — every
+// value shares one cache entry, so a leaked one would run the first frame's filter on
+// every later frame — and that the argument order codegen reports matches the signature
+// it emits, since the backend builds the argument list from the former alone.
+// ---------------------------------------------------------------------------------------
+
+TEST_CASE("a parameterized kernel contains no parameter values", "[codegen]") {
+  const std::string source =
+      emit_parameterized("brightness:0.25,gaussian:1.4,threshold:0.3").source;
+  CHECK(source == emit_parameterized("brightness:-0.5,gaussian:3,threshold:0.9").source);
+
+  CHECK_FALSE(contains(source, literal(0.25F)));
+  CHECK_FALSE(contains(source, literal(0.3F)));
+  for (const float weight : imgjit::cpu::gaussian_weights_1d(1.4F)) {
+    CHECK_FALSE(contains(source, literal(weight)));
+  }
+  CHECK(contains(source, "// chain:    \"brightness:<arg>,gaussian:<arg>,threshold:<arg>\""));
+}
+
+TEST_CASE("a parameterized gaussian loops to a runtime radius", "[codegen]") {
+  // The A/B's whole point. Baked, the radius is a literal loop bound NVRTC can unroll
+  // and the weights are constants it can fold; here both are arguments.
+  const GeneratedProgram program = emit_parameterized("gaussian:1.4");
+  REQUIRE(program.stages.size() == 1);
+  CHECK(contains(program.source, "struct imgjit_gaussian_taps { float w[25]; };"));
+  CHECK(contains(program.source,
+                 "int width, int height, int radius, imgjit_gaussian_taps taps) {"));
+  CHECK(contains(program.source, "for (int dy = -radius; dy <= radius; ++dy)"));
+  CHECK(contains(program.source, "taps.w[dy + radius] * taps.w[dx + radius]"));
+  CHECK_FALSE(contains(program.source, "imgjit_stage0_w["));
+  CHECK(program.stages.front().param_ops == std::vector<std::size_t>{0});
+}
+
+TEST_CASE("the taps struct holds the widest gaussian the op set allows", "[codegen]") {
+  const float widest = imgjit::op_spec(imgjit::OpKind::kGaussian).max_param;
+  CHECK(2 * imgjit::cpu::gaussian_radius(widest) + 1 == imgjit::cuda::kMaxGaussianTaps);
+}
+
+TEST_CASE("parameterized arguments follow the signature, stencil first", "[codegen]") {
+  // Chain indices 0..4. Stage 0: brightness(0) as prologue, gaussian(1), threshold(2) as
+  // epilogue. Stage 1: sobel(3), brightness(4) as epilogue.
+  const GeneratedProgram program =
+      emit_parameterized("brightness:0.1,gaussian:1.4,threshold:0.3,sobel,brightness:0.2");
+  REQUIRE(program.stages.size() == 2);
+  CHECK(program.stages[0].param_ops == std::vector<std::size_t>{1, 0, 2});
+  CHECK(program.stages[1].param_ops == std::vector<std::size_t>{4});
+
+  const std::string& source = program.source;
+  CHECK(contains(source, "imgjit_stage0(\n"
+                         "    const unsigned char* __restrict__ src, unsigned char* __restrict__ "
+                         "dst,\n"
+                         "    int width, int height, int radius, imgjit_gaussian_taps taps, "
+                         "float p0, float p2) {"));
+  CHECK(contains(source, "imgjit_stage1(\n"
+                         "    const unsigned char* __restrict__ src, unsigned char* __restrict__ "
+                         "dst,\n"
+                         "    int width, int height, float p4) {"));
+
+  // The prologue's value is handed through the tap helper, where the prologue runs.
+  CHECK(contains(source, "float* v, float p0) {"));
+  CHECK(contains(source, "imgjit_stage0_tap(src, x + dx, y + dy, width, height, t, p0);"));
+  CHECK(contains(source, "imgjit_quantize(v[0] + p0)"));
+  CHECK(contains(source, "v[0] >= p2 ? 1.0f : 0.0f"));
+
+  // A pointwise-only stage takes its values the same way.
+  const GeneratedProgram pointwise = emit_parameterized("invert,threshold:0.4");
+  REQUIRE(pointwise.stages.size() == 1);
+  CHECK(pointwise.stages[0].param_ops == std::vector<std::size_t>{1});
+  CHECK(contains(pointwise.source, "int width, int height, float p1) {"));
+
+  // And baked reports none: every value is a literal there.
+  for (const auto& stage :
+       emit("brightness:0.1,gaussian:1.4,threshold:0.3,sobel,brightness:0.2").stages) {
+    CHECK(stage.param_ops.empty());
+  }
+}
+
+TEST_CASE("the kernel's shape stays baked when its constants are not", "[codegen]") {
+  // Sobel's 3x3 is the op's definition and the channel count is layout; neither is a
+  // client's parameter, so both stay literals and a lone sobel takes no extra arguments.
+  const GeneratedProgram program = emit_parameterized("sobel", 4);
+  REQUIRE(program.stages.size() == 1);
+  CHECK(program.stages[0].param_ops.empty());
+  CHECK(contains(program.source, "imgjit_stage0_gx[9] = {-1.0f"));
+  CHECK(contains(program.source, "int width, int height) {"));
+  CHECK(contains(program.source, "* 4;"));
+  CHECK(contains(program.source, "dst[i + 3] = src[i + 3];"));
 }

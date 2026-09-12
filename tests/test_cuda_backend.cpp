@@ -32,6 +32,7 @@ using imgjit::KernelKey;
 using imgjit::OpChain;
 using imgjit::parse_op_chain;
 using imgjit::TileVariant;
+using imgjit::ConstantsMode;
 
 namespace {
 
@@ -76,8 +77,8 @@ int max_abs_difference(const Image& lhs, const Image& rhs) {
 class Gpu {
  public:
   explicit Gpu(std::size_t max_slot_bytes, TileVariant tile = TileVariant::kNaive,
-               int tile_size = 0)
-      : backend_(0, imgjit::CudaBackend::kDefaultStreams, tile, tile_size),
+               int tile_size = 0, ConstantsMode constants = ConstantsMode::kBaked)
+      : backend_(0, imgjit::CudaBackend::kDefaultStreams, tile, tile_size, constants),
         slot_(backend_.allocate_slots(1, max_slot_bytes)),
         max_bytes_(max_slot_bytes) {}
 
@@ -426,4 +427,119 @@ TEST_CASE("a tile codegen cannot emit is refused when the backend is built", "[t
   // server that accepts connections and answers every frame with status 6.
   CHECK_THROWS_AS(imgjit::CudaBackend(0, 1, TileVariant::kTiled, 64), std::invalid_argument);
   CHECK_THROWS_AS(imgjit::CudaBackend(0, 1, TileVariant::kNaive, 16), std::invalid_argument);
+}
+
+// ---------------------------------------------------------------------------------------
+// Phase 8 (docs/PLAN.md): parameterized constants. Registered as phase8_gpu_constants.
+// The question is not only "is it right" but "are the values really the frame's": the
+// cached kernel is shared by every parameter value, so a launch that passed stale values
+// would still produce a plausible image — just the wrong one.
+// ---------------------------------------------------------------------------------------
+
+TEST_CASE("parameterized kernels match the CPU oracle", "[constants]") {
+  // The same corpus, input and <=1 LSB bar as the baked gate.
+  constexpr int kWidth = 37;
+  constexpr int kHeight = 23;
+  Gpu gpu(static_cast<std::size_t>(kWidth) * kHeight * 4, TileVariant::kNaive, 0,
+          ConstantsMode::kParameterized);
+  for (const int channels : {1, 3, 4}) {
+    const Image input = make_image(kWidth, kHeight, channels);
+    for (const std::string_view text : kCorpus) {
+      CAPTURE(text, channels);
+      const OpChain chain = chain_for(text);
+      CHECK(max_abs_difference(imgjit::cpu::apply_chain(input, chain), gpu.run(input, chain)) <=
+            1);
+    }
+  }
+}
+
+TEST_CASE("parameterized output matches the baked kernel's", "[constants]") {
+  // Both modes convolve with the same weights (the backend computes them with the very
+  // function codegen bakes from) through the same arithmetic, so they are expected to
+  // agree exactly; <=1 is the plan's bar.
+  //
+  // Baked outputs first, and that backend closed out before the parameterized one is
+  // built — one live CudaBackend per thread (see "tiled output matches the naive
+  // kernel's").
+  constexpr int kWidth = 131;
+  constexpr int kHeight = 97;
+  const std::size_t bytes = static_cast<std::size_t>(kWidth) * kHeight * 4;
+  constexpr std::string_view kChains[] = {
+      "gaussian:0.5",
+      "gaussian:4",
+      "brightness:-0.35",
+      "grayscale,gaussian:1.4,sobel,threshold:0.3",
+      "brightness:0.1,gaussian:1,threshold:0.6,sobel,brightness:-0.2",
+  };
+
+  std::vector<Image> expected;
+  double baked_kernel_ms = 0.0;
+  {
+    Gpu baked(bytes);
+    for (const int channels : {1, 3, 4}) {
+      const Image input = make_image(kWidth, kHeight, channels);
+      for (const std::string_view text : kChains) {
+        expected.push_back(baked.run(input, chain_for(text)));
+      }
+    }
+    baked_kernel_ms = baked.stats().mean_kernel_ms;
+  }
+  CHECK(baked_kernel_ms > 0.0);
+
+  Gpu parameterized(bytes, TileVariant::kNaive, 0, ConstantsMode::kParameterized);
+  std::size_t index = 0;
+  for (const int channels : {1, 3, 4}) {
+    const Image input = make_image(kWidth, kHeight, channels);
+    for (const std::string_view text : kChains) {
+      CAPTURE(text, channels);
+      CHECK(max_abs_difference(expected[index++], parameterized.run(input, chain_for(text))) <= 1);
+    }
+  }
+  CHECK(parameterized.stats().mean_kernel_ms > 0.0);
+}
+
+TEST_CASE("one parameterized compile serves every parameter value", "[constants]") {
+  // Invariant 4 with the values out of the key: three sigmas and three brightnesses, one
+  // compile. Each frame is also diffed against the oracle for ITS OWN values, which is
+  // what proves the launch passed this frame's parameters rather than the ones the
+  // cached kernel was first compiled for.
+  Gpu gpu(64 * 64 * 4, TileVariant::kNaive, 0, ConstantsMode::kParameterized);
+  const Image input = make_image(64, 64, 3);
+  for (const std::string_view text :
+       {"brightness:0.1,gaussian:0.5,brightness:-0.1", "brightness:-0.2,gaussian:1.4,brightness:0.3",
+        "brightness:0.3,gaussian:4,brightness:0.05"}) {
+    CAPTURE(text);
+    const OpChain chain = chain_for(text);
+    CHECK(max_abs_difference(imgjit::cpu::apply_chain(input, chain), gpu.run(input, chain)) <= 1);
+  }
+  CHECK(gpu.compiles() == 1);
+
+  // The shape still counts: a different op order, and a different channel count.
+  gpu.run(input, chain_for("gaussian:1.4,brightness:0.3,brightness:0.1"));
+  CHECK(gpu.compiles() == 2);
+  gpu.run(make_image(64, 64, 4), chain_for("brightness:0.1,gaussian:0.5,brightness:-0.1"));
+  CHECK(gpu.compiles() == 3);
+}
+
+TEST_CASE("the constants mode is part of the kernel identity", "[constants]") {
+  imgjit::CudaBackend backend;
+  KernelKey key;
+  key.chain = chain_for("gaussian:1.4,sobel");
+  key.channels = 3;
+
+  backend.cache().get(key);
+  key.constants = ConstantsMode::kParameterized;
+  backend.cache().get(key);
+  CHECK(backend.compile_count() == 2);
+
+  // Parameterized, a new sigma is the same kernel.
+  key.chain = chain_for("gaussian:3,sobel");
+  backend.cache().get(key);
+  CHECK(backend.compile_count() == 2);
+}
+
+TEST_CASE("a tiled parameterized backend is refused when it is built", "[constants]") {
+  CHECK_THROWS_AS(
+      imgjit::CudaBackend(0, 1, TileVariant::kTiled, 16, ConstantsMode::kParameterized),
+      std::invalid_argument);
 }
