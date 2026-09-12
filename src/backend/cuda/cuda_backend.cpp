@@ -1,12 +1,15 @@
 #include "backend/cuda/cuda_backend.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
+
+#include "imgjit/backend/cpu/ops.h"
 
 namespace imgjit {
 namespace {
@@ -22,17 +25,23 @@ unsigned int grid_dim(int extent, unsigned int block) {
 }  // namespace
 
 CudaBackend::CudaBackend(int device_ordinal, std::size_t stream_count, TileVariant tile,
-                         int tile_size)
+                         int tile_size, ConstantsMode constants)
     : context_(std::in_place, device_ordinal),
       cache_(context_->compute_arch()),
       device_ordinal_(device_ordinal),
       stream_count_(stream_count == 0 ? 1 : stream_count),
       tile_(tile),
-      tile_size_(tile_size) {
+      tile_size_(tile_size),
+      constants_(constants) {
   if (!cuda::is_supported_tile(tile, tile_size)) {
     throw std::invalid_argument("CudaBackend: unsupported tile size " + std::to_string(tile_size) +
                                 " (naive takes 0, tiled takes 1-" +
                                 std::to_string(cuda::kMaxTileSize) + ")");
+  }
+  if (!cuda::is_supported_constants(constants, tile)) {
+    throw std::invalid_argument(
+        "CudaBackend: parameterized constants need naive stencils — a tiled stage sizes its "
+        "__shared__ tile from a radius that is only known at launch");
   }
 }
 
@@ -82,6 +91,7 @@ KernelKey CudaBackend::key_for(const OpChain& chain, const int channels) const {
   key.channels = channels;
   key.tile = tile_;
   key.tile_size = tile_size_;
+  key.constants = constants_;
   return key;
 }
 
@@ -187,17 +197,47 @@ void CudaBackend::launch(const FrameJob& job, const JobHandle handle) {
   // NVRTC compile either — that already happened, on the host, in cache_.get() above.
   CU_CHECK(cuEventRecord(slot.kernels_begin.get(), stream));
 
-  // Every stage has the same signature, so multi-stage execution is a ping-pong: read
-  // `source`, write `destination`, swap. After the loop `source` names the buffer the
-  // last stage wrote. Each stage launches with the block edge codegen emitted it for.
+  // Every stage starts with the same four arguments, so multi-stage execution is a
+  // ping-pong: read `source`, write `destination`, swap. After the loop `source` names
+  // the buffer the last stage wrote. Each stage launches with the block edge codegen
+  // emitted it for.
   int width = job.width;
   int height = job.height;
   for (std::size_t s = 0; s < compiled.stage_functions.size(); ++s) {
-    const auto block = static_cast<unsigned int>(compiled.program.stages[s].block_dim);
-    void* arguments[] = {&source, &destination, &width, &height};
+    const cuda::GeneratedStage& stage = compiled.program.stages[s];
+    const auto block = static_cast<unsigned int>(stage.block_dim);
+
+    // Parameterized mode: this frame's own parameter values, appended in the order
+    // codegen declared them. They come from job.chain and never from the cached key —
+    // that key ignores parameters, so it holds whichever frame's values compiled it.
+    // Everything is sized before an address is taken, so the pointers stay valid until
+    // cuLaunchKernel has copied the values. A stage has at most one stencil, so at most
+    // one gaussian's radius and weights.
+    int radius = 0;
+    std::array<float, cuda::kMaxGaussianTaps> taps{};
+    static_assert(sizeof(taps) == sizeof(float) * cuda::kMaxGaussianTaps,
+                  "must match the generated imgjit_gaussian_taps struct byte for byte");
+    std::vector<float> scalars(stage.param_ops.size());
+    std::vector<void*> arguments{&source, &destination, &width, &height};
+    for (std::size_t p = 0; p < stage.param_ops.size(); ++p) {
+      const Op& op = job.chain.ops[stage.param_ops[p]];
+      if (op.kind == OpKind::kGaussian) {
+        // The same function codegen bakes from, so the two modes convolve with
+        // bit-identical weights.
+        radius = cpu::gaussian_radius(op.param);
+        const std::vector<float> weights = cpu::gaussian_weights_1d(op.param);
+        std::copy(weights.begin(), weights.end(), taps.begin());
+        arguments.push_back(&radius);
+        arguments.push_back(&taps);
+      } else {
+        scalars[p] = op.param;
+        arguments.push_back(&scalars[p]);
+      }
+    }
+
     CU_CHECK(cuLaunchKernel(compiled.stage_functions[s], grid_dim(width, block),
-                            grid_dim(height, block), 1, block, block, 1, 0, stream, arguments,
-                            nullptr));
+                            grid_dim(height, block), 1, block, block, 1, 0, stream,
+                            arguments.data(), nullptr));
     std::swap(source, destination);
   }
   CU_CHECK(cuEventRecord(slot.kernels_end.get(), stream));

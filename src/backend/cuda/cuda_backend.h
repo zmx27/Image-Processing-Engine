@@ -76,8 +76,14 @@ class CudaBackend final : public IBackend {
   // a cache entry. Naive by default. Throws std::invalid_argument on a tile codegen
   // cannot emit (cuda::is_supported_tile), so a bad --tile fails at startup rather than
   // as an error on every frame.
+  //
+  // `constants` picks op parameters baked as literals or passed as launch arguments
+  // (docs/PLAN.md Phase 8), and goes into every key the same way. Parameterized with a
+  // tiled variant is refused at construction for the same reason
+  // (cuda::is_supported_constants).
   explicit CudaBackend(int device_ordinal = 0, std::size_t stream_count = kDefaultStreams,
-                       TileVariant tile = TileVariant::kNaive, int tile_size = 0);
+                       TileVariant tile = TileVariant::kNaive, int tile_size = 0,
+                       ConstantsMode constants = ConstantsMode::kBaked);
 
   std::byte* allocate_slots(std::size_t count, std::size_t bytes) override;
   JobHandle submit(const FrameJob& job) override;
@@ -157,7 +163,8 @@ class CudaBackend final : public IBackend {
   // is returned to the free list.
   void retire_ready_streams();
 
-  // The frame's codegen inputs plus this backend's own (the tile). prewarm() and launch()
+  // The frame's codegen inputs plus this backend's own (the tile and the constants
+  // mode). prewarm() and launch()
   // both build their keys here, so a warmed entry is always the entry a frame looks up.
   KernelKey key_for(const OpChain& chain, int channels) const;
 
@@ -183,6 +190,7 @@ class CudaBackend final : public IBackend {
   std::size_t stream_count_{kDefaultStreams};
   TileVariant tile_{TileVariant::kNaive};
   int tile_size_{0};
+  ConstantsMode constants_{ConstantsMode::kBaked};
   std::size_t slot_bytes_{0};
   JobHandle next_handle_{1};
   std::uint64_t next_submit_order_{1};
