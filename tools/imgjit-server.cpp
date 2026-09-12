@@ -268,11 +268,12 @@ int main(int argc, char** argv) {
     // under --streams 1 (imgjit/backend/backend.h).
     const imgjit::BackendStats stats = server.backend_stats();
     std::printf("imgjit-server: streams — mean in flight %.2f, peak %llu, %llu submit stalls, "
-                "%llu context recreation%s, mean kernel %.3f ms\n",
+                "%llu context recreation%s, mean kernel %.3f ms, %llu NVRTC compiles\n",
                 stats.mean_in_flight, static_cast<unsigned long long>(stats.max_in_flight),
                 static_cast<unsigned long long>(stats.submit_stalls),
                 static_cast<unsigned long long>(stats.context_recreations),
-                stats.context_recreations == 1 ? "" : "s", stats.mean_kernel_ms);
+                stats.context_recreations == 1 ? "" : "s", stats.mean_kernel_ms,
+                static_cast<unsigned long long>(stats.jit_compiles));
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "imgjit-server: %s\n", error.what());

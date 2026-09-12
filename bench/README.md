@@ -117,6 +117,44 @@ the wait. The two extra rows — the showcase chain, naive vs tile 16, at `--str
 end-to-end view: what tiling is worth on top of the Phase 6 pipeline, where the compute engine is
 the bottleneck and a faster kernel should show up in `fps` directly.
 
+## Recording the Phase 8 matrix
+
+Phase 8 widens the same harness over the orthogonal matrix. Cell 21 of `colab/run.ipynb` runs it
+as **six focused sweeps** — each varying one axis with the others pinned — rather than one
+cartesian product, which at six axes would be hundreds of runs and no clearer about any of them:
+
+| Sweep | Axis | Read off |
+|---|---|---|
+| `resolution` | 512² → 4K | `fps`, `gb_per_s` |
+| `constants` | baked vs parameterized | `mean_kernel_ms` |
+| `cache` | cold vs warm, four different sigmas | `nvrtc_compiles`, `cold_first_ms` |
+| `tile_x_streams` | naive/tiled × 1/4 streams | `mean_kernel_ms`, `fps` |
+| `fusion` | four one-op chains vs one fused chain | `mean_kernel_ms` |
+| `chain_length` | 1, 2, 4, 6 ops | `mean_kernel_ms`, `fps` |
+
+It writes two files. `baseline_phase8.csv` is what `imgjit-bench` appends, exactly as in every
+earlier phase. `phase8_matrix.csv` joins each of those rows to the configuration the server was
+started with plus the two server-side instruments (`mean_kernel_ms`, `nvrtc_compiles`), so the
+README results table is built from one file with real axis columns instead of by decoding label
+strings — which is what the earlier phases did, and what stops scaling at six axes.
+
+**The `constants` axis has a cost side and a benefit side, and only one of them is a speed.**
+Parameterized kernels take each op's parameters as launch arguments rather than baked literals, so
+the gaussian's tap loop has bounds NVRTC cannot unroll — that shows up as a slower
+`mean_kernel_ms`, measured at `--streams 1` for Phase 7's reason. The payoff is the `cache` sweep:
+four connections asking for four *different* sigmas compile four kernels when constants are baked
+and **one** when they are parameterized, which is `nvrtc_compiles` and `cold_first_ms`. A run that
+only measured kernel time would conclude the mode is strictly worse.
+
+**Parameterized is naive-only** (`--constants parameterized` with `--tile` is refused at startup):
+a tiled stage sizes its `__shared__` array from the stencil radius at compile time, which a
+parameterized kernel does not know until launch. See `docs/PLAN.md` Phase 8.
+
+**The fusion sweep's unfused baseline is an approximation.** Codegen has no "don't fuse" mode —
+fusion is structural — so the stand-in is the same four ops sent as four separate one-op chains,
+and the comparison is the *sum of their kernel times* against the fused chain's. Four chains are
+also four round trips, which is why the summary compares `mean_kernel_ms` and never `fps`.
+
 ## Reading the columns
 
 | Column | Meaning |

@@ -409,6 +409,7 @@ BackendStats CudaBackend::stats() const {
       occupancy_samples_ == 0 ? 0.0 : occupancy_sum_ / static_cast<double>(occupancy_samples_);
   snapshot.mean_kernel_ms =
       kernel_samples_ == 0 ? 0.0 : kernel_ms_sum_ / static_cast<double>(kernel_samples_);
+  snapshot.jit_compiles = static_cast<std::uint64_t>(cache_.compile_count());
   return snapshot;
 }
 

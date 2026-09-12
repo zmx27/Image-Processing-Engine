@@ -89,6 +89,14 @@ struct BackendStats {
   // other frames' kernels into this frame's window (kernels do not overlap kernels on a
   // full-size image — docs/PLAN.md Phase 6), so the number then includes the wait.
   double mean_kernel_ms{0.0};
+  // Phase 8: runtime kernel compiles since startup, the prewarm included. Both of this
+  // phase's own axes are read off it — a load that varies one op's parameter compiles
+  // once per distinct value when constants are baked, and once in total when they are
+  // parameterized (docs/PLAN.md Phase 8). 0 on a backend that compiles nothing.
+  //
+  // Deliberately not named for the compiler that does it: this is the portable
+  // interface, and invariant 1's grep scans include/ for exactly that spelling.
+  std::uint64_t jit_compiles{0};
 };
 
 class IBackend {
