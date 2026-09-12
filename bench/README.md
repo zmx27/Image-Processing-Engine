@@ -155,6 +155,18 @@ fusion is structural — so the stand-in is the same four ops sent as four separ
 and the comparison is the *sum of their kernel times* against the fused chain's. Four chains are
 also four round trips, which is why the summary compares `mean_kernel_ms` and never `fps`.
 
+**Measured result** (`bench/phase8_results.md`, Colab T4): parameterized constants cost
+**1.36-1.42x** kernel time and buy **4 compiles → 1** with a 3.1x lower worst first frame on a
+cold cache, break-even ≈110 frames per distinct parameter value. **Tile 16 at one stream is the
+fastest configuration in the matrix** (1.80x the naive baseline); streams add +11% on naive and
+nothing on top of tiling. Fusion is **1.28x slower** in kernel time for the showcase chain, because
+a prologue re-runs at every stencil tap. An NVRTC compile measured ≈97 ms.
+
+**Read §0 of the results before any single number.** One configuration appears in three sweeps, so
+it was measured three times: the spread is **3.5% on kernel time, 1.6% on FPS**. That is the
+harness's repeatability and the bar a difference must clear to be real — which is also why the
+Phase 7 tiled-Sobel result is restated there as "not measurably faster" rather than a regression.
+
 ## Reading the columns
 
 | Column | Meaning |

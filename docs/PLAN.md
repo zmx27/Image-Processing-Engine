@@ -464,21 +464,40 @@ around the stages, excluding copies and compile, and is a clean per-frame number
       `phase8_gpu_constants` verified on Colab (T4, 8.16s): parameterized kernels match the
       CPU oracle, match the baked kernel's own output, and one compile serves several
       parameter values. Portable suite green, invariant 1's grep silent.
-- [ ] `bench/` CSV harness — widens the Phase 5 timing harness over the orthogonal matrix:
+- [x] `bench/` CSV harness — widens the Phase 5 timing harness over the orthogonal matrix:
       naive|tiled × sync|async, plus fused-vs-unfused chain, cold-vs-warm cache,
       baked-vs-parameterized constants (the constants mode must already be a `KernelKey` input —
       see Phase 3, or the parameterized run silently reuses the baked kernel)
-- [ ] Sweep 512² → 4K and chain lengths; report FPS, GB/s, p50/p99 round-trip latency
+- [x] Chain lengths (1, 2, 4, 6 ops); report FPS, p50/p99 round-trip latency
+- [ ] Sweep 512² → 4K, report FPS and GB/s — **first pass invalidated, rerun in progress.** The
+      original run held concurrency fixed at 8 frames in flight across every resolution;
+      `imgjit-bench` is a closed loop, so its fps is mechanically tied to latency at fixed
+      concurrency (Little's Law) whether or not the GPU is the bottleneck, and every recorded row
+      landed within ~15% of that theoretical cap — meaning the "peak Mpx/s at 1024²" shape drawn
+      from it cannot be told apart from "8 in flight did not saturate the pipeline at that size."
+      Withdrawn from `bench/phase8_results.md` §2 rather than left standing. The rerun
+      (`colab/run.ipynb`, the dedicated resolution cell) sizes the slot to each resolution's real
+      frame and raises concurrency per resolution until `BackendStats::submit_stalls` goes
+      nonzero — a direct signal the GPU worker itself is the bottleneck, not an inference from an
+      fps ratio.
 
-      Both of the above are **written and locally dry-run, not yet recorded**: cell 21 of
+      **Recorded on Colab (T4), written up in `bench/phase8_results.md`.** Cell 21 of
       `colab/run.ipynb` runs six focused sweeps (one axis each, the rest pinned — a cartesian
       product of six axes is hundreds of runs and no clearer) and writes `baseline_phase8.csv`
       plus `phase8_matrix.csv`, the latter joining each row to the server configuration and the
-      two server-side instruments so the README table needs no label decoding. `BackendStats`
+      two server-side instruments so the results table needs no label decoding. `BackendStats`
       gained `jit_compiles` for this: the compile count was only ever printed at prewarm time,
       and the cold-vs-warm and constants axes are both read off it after a run. (Named for the
       technique, not the compiler — `nvrtc` in a portable header trips invariant 1's grep.)
-      **Next:** run that cell on Colab and commit the two CSVs.
+
+      Headline numbers: **parameterized constants cost 1.36–1.42x kernel time and buy a 3.1x
+      lower worst first frame** on a cold cache with four distinct sigmas (4 compiles → 1),
+      break-even ≈110 frames per distinct value; **tile 16 at one stream is the fastest
+      configuration measured** (1.80x the naive baseline), with streams adding nothing on top of
+      tiling; NVRTC compile measured at ≈97 ms, inside `ARCHITECTURE.md`'s "~50–200 ms" claim.
+      The harness's own repeatability is 3.5% on kernel time (§0), which is stated first because
+      it is the bar every other difference has to clear — and it qualifies Phase 7's ~3% tiled
+      Sobel regression down to "not measurably faster".
 - [ ] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
       context recreation holds under fault, and that the server survives
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
@@ -502,6 +521,17 @@ at compile time, which a parameterized kernel does not know until launch. Dynami
 memory would lift that at the cost of reworking Phase 7's verified tile indexing; the plan
 lists baked-vs-parameterized as its own axis rather than crossed with tiling, so the
 combination is refused at startup instead, like a bad `--tile`.
+
+**A prologue costs more than it saves, and that is a finding rather than a bug.** The fusion
+sweep measured the showcase chain's fused kernels at **1.28x** the summed kernel time of the same
+four ops unfused (`bench/phase8_results.md` §4), because `grayscale` sits in front of an 11x11
+Gaussian and is therefore re-run at all 121 taps instead of once per output pixel. Fusion still
+saves the launches and the global round trips, and an *epilogue* is unaffected — codegen's
+existing preference for attaching pointwise runs backwards is exactly the right one, now with a
+number behind it. `ARCHITECTURE.md`'s unconditional framing of fusion is qualified to match.
+The obvious follow-up — emit a prologue as its own pointwise kernel once the following stencil's
+radius is large enough — is **not** taken: it is a codegen change with its own correctness
+surface, and the op set and fusion plan were settled in Phase 2. Recorded, not scheduled.
 
 ## Stretch (explicitly not required for the three pillars)
 

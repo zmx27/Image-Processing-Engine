@@ -30,6 +30,12 @@ little reuse. Both tile sizes land at 0.151 ms against naive's 0.146 ms: a repro
 regression, not noise. **This is short of this phase's original "Done when" bar of faster on both
 Gaussian and Sobel** — see §4 for how that is resolved.
 
+> **Qualified by Phase 8** (`bench/phase8_results.md` §0). Measuring one configuration three times
+> put this harness's repeatability at 3.5% on kernel time, so a 3% difference is at the edge of
+> what it resolves. Two tile sizes landing on the same value is still evidence that a single
+> repeat is not, but the defensible claim is that tiled Sobel is **not measurably faster** — the
+> sign of the small residual should not be read as a real regression.
+
 ## 2. Streams and kernel time do not mix cleanly — expected, and the reason `--streams 1` was the rule
 
 The two `--streams 4` rows exist to show *why* every number above was measured at `--streams 1`:

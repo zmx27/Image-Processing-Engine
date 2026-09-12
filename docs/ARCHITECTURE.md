@@ -22,10 +22,25 @@ binary bloat this design avoids. This is also why the wire protocol carries an o
 single op code — a single op per frame would be a weak justification for JIT, since a handful of
 ops could just be precompiled.
 
+*Measured, and only half confirmed* (`bench/phase8_results.md` §4): the saving is real for a
+pointwise op fused **after** a stencil, which runs once per output pixel either way. Fused
+**before** one it is not — a prologue is re-executed at every stencil tap, so `grayscale` in front
+of an 11x11 Gaussian costs 121 evaluations per pixel instead of one, and the showcase chain's
+fused kernels take **1.28x the kernel time** of the same four ops run unfused. Fusion still saves
+the launches, the global round trips and (through the server) the network round trips; what it
+does not do is unconditionally reduce compute. Codegen already prefers attaching pointwise runs
+backwards for this reason — the measurement is what puts a number on the preference.
+
 **2. Constant baking.** Filter radius, Gaussian weights, threshold, and channel count are emitted
 as compile-time literals, letting NVRTC fully unroll stencil loops and constant-fold. The
 alternative — passing them as kernel parameters — leaves dynamic bounds in the inner loop. This
 gives a clean A/B benchmark axis: same kernel, baked vs. parameterized.
+
+*Measured* (`bench/phase8_results.md` §1): baked kernels run **1.36-1.42x faster**, and
+parameterized ones compile **once for every parameter value** instead of once per value — four
+distinct sigmas are 4 compiles baked and 1 parameterized, worth a 3.1x lower worst first frame on
+a cold cache. Break-even is ~110 frames per distinct value, which is the rule the flag exists to
+make choosable: `--constants parameterized` for a per-request slider, the default for presets.
 
 **Do not bake width/height.** They are launch-time kernel arguments. Baking them would make every
 new resolution a cache miss and a fresh ~100 ms compile, growing the cache unboundedly and
@@ -216,7 +231,10 @@ image-processing/
 - **Memory safety:** a checksum stress test specifically targeting premature slot reuse
   (invariant 3).
 - **Overlap:** Nsight Systems timeline must show real concurrency, not merely a better number.
-- **Performance:** every claim in this document maps to a row in the Phase 8 benchmark table.
+- **Performance:** every claim in this document maps to a row in the Phase 8 benchmark table —
+  `bench/phase8_results.md` §6 is that mapping, and it records the two claims measurement
+  qualified rather than confirmed (fusion's prologue cost, and multi-stream overlap adding
+  nothing on top of tiling).
 
 ## Open risk
 
