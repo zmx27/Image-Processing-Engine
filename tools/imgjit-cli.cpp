@@ -49,6 +49,9 @@ void print_usage() {
                "                       n x n __shared__ tile, n in 1..32\n"
                "                       big win on gaussian; no win on sobel, whose radius-1\n"
                "                       apron is too small to be worth tiling (bench/phase7_results.md)\n"
+               "  --constants baked|parameterized\n"
+               "                       op parameters as kernel literals (default) or launch\n"
+               "                       arguments; parameterized needs --tile naive\n"
                "  --dump-source <file> write the generated CUDA source (works without a GPU)\n"
                "  --dump-ptx <file>    write the PTX NVRTC produced (--backend cuda only)\n"
                "  --repeat <n>         run the chain n times; run 1 is cold, the rest warm\n");
@@ -80,6 +83,7 @@ int main(int argc, char** argv) {
   int repeat = 1;
   imgjit::TileVariant tile = imgjit::TileVariant::kNaive;
   int tile_size = 0;
+  imgjit::ConstantsMode constants = imgjit::ConstantsMode::kBaked;
 
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -91,6 +95,14 @@ int main(int argc, char** argv) {
       const std::string value = argv[++i];
       tile = value == "naive" ? imgjit::TileVariant::kNaive : imgjit::TileVariant::kTiled;
       tile_size = value == "naive" ? 0 : std::atoi(value.c_str());
+    } else if (argument == "--constants" && i + 1 < argc) {
+      const std::string value = argv[++i];
+      if (value != "baked" && value != "parameterized") {
+        std::fprintf(stderr, "imgjit-cli: --constants must be baked or parameterized\n");
+        return 2;
+      }
+      constants = value == "baked" ? imgjit::ConstantsMode::kBaked
+                                   : imgjit::ConstantsMode::kParameterized;
     } else if (argument == "--dump-source" && i + 1 < argc) {
       dump_source_path = argv[++i];
     } else if (argument == "--dump-ptx" && i + 1 < argc) {
@@ -123,6 +135,10 @@ int main(int argc, char** argv) {
   if (!imgjit::cuda::is_supported_tile(tile, tile_size)) {
     std::fprintf(stderr, "imgjit-cli: --tile must be naive or a tile edge in 1..%d\n",
                  imgjit::cuda::kMaxTileSize);
+    return 2;
+  }
+  if (!imgjit::cuda::is_supported_constants(constants, tile)) {
+    std::fprintf(stderr, "imgjit-cli: --constants parameterized needs --tile naive\n");
     return 2;
   }
   if (backend_name != "cpu" && backend_name != "cuda") {
@@ -158,16 +174,18 @@ int main(int argc, char** argv) {
     key.channels = input.channels();
     key.tile = tile;
     key.tile_size = tile_size;
+    key.constants = constants;
     const std::string tile_text =
         tile == imgjit::TileVariant::kNaive
             ? std::string("naive")
             : std::to_string(tile_size) + "x" + std::to_string(tile_size) + " tiled";
     std::printf("imgjit-cli: %s — %dx%d, %d channels\n", input_path.c_str(), input.width(),
                 input.height(), input.channels());
-    std::printf("imgjit-cli: chain \"%s\" — kernel key %016llx, backend %s, %s stencils\n",
-                imgjit::canonical_string(*chain).c_str(),
-                static_cast<unsigned long long>(imgjit::hash_kernel_key(key)),
-                backend_name.c_str(), tile_text.c_str());
+    std::printf(
+        "imgjit-cli: chain \"%s\" — kernel key %016llx, backend %s, %s stencils, %s constants\n",
+        imgjit::canonical_string(*chain).c_str(),
+        static_cast<unsigned long long>(imgjit::hash_kernel_key(key)), backend_name.c_str(),
+        tile_text.c_str(), constants == imgjit::ConstantsMode::kBaked ? "baked" : "parameterized");
 
     if (!dump_source_path.empty()) {
       const imgjit::cuda::GeneratedProgram program = imgjit::cuda::emit_cuda_source(key);
@@ -182,7 +200,7 @@ int main(int argc, char** argv) {
     imgjit::CudaBackend* cuda_backend = nullptr;
     if (backend_name == "cuda") {
       auto owned = std::make_unique<imgjit::CudaBackend>(
-          0, imgjit::CudaBackend::kDefaultStreams, tile, tile_size);
+          0, imgjit::CudaBackend::kDefaultStreams, tile, tile_size, constants);
       cuda_backend = owned.get();
       std::printf("imgjit-cli: device 0, %s\n", owned->context().compute_arch().c_str());
       backend = std::move(owned);

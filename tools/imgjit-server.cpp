@@ -55,6 +55,9 @@ void print_usage() {
                "                        an n x n __shared__ tile, n in 1..32 (cuda only)\n"
                "                        big win on gaussian; no win on sobel, whose radius-1\n"
                "                        apron is too small to be worth tiling (bench/phase7_results.md)\n"
+               "  --constants baked|parameterized\n"
+               "                        op parameters as kernel literals (default) or launch\n"
+               "                        arguments; parameterized needs --tile naive (cuda only)\n"
                "  --prewarm \"<chain>[@ch]\"  compile a chain at startup; repeatable\n"
                "                        (channels default 3; --backend cuda only)\n"
                "  --slots <n>           frame slots in the pool (default 8)\n"
@@ -109,6 +112,8 @@ int main(int argc, char** argv) {
   // this binary, so the comparison never depends on a build that no longer exists.
   imgjit::TileVariant tile = imgjit::TileVariant::kNaive;
   [[maybe_unused]] int tile_size = 0;  // read only by the CUDA backend
+  // The Phase 8 A/B axis, the same shape again.
+  imgjit::ConstantsMode constants = imgjit::ConstantsMode::kBaked;
 
   for (int i = 1; i < argc; ++i) {
     const std::string argument = argv[i];
@@ -122,6 +127,14 @@ int main(int argc, char** argv) {
       const std::string value = argv[++i];
       tile = value == "naive" ? imgjit::TileVariant::kNaive : imgjit::TileVariant::kTiled;
       tile_size = value == "naive" ? 0 : std::atoi(value.c_str());
+    } else if (argument == "--constants" && i + 1 < argc) {
+      const std::string value = argv[++i];
+      if (value != "baked" && value != "parameterized") {
+        std::fprintf(stderr, "imgjit-server: --constants must be baked or parameterized\n");
+        return 2;
+      }
+      constants = value == "baked" ? imgjit::ConstantsMode::kBaked
+                                   : imgjit::ConstantsMode::kParameterized;
     } else if (argument == "--prewarm" && i + 1 < argc) {
       PrewarmEntry entry;
       if (!parse_prewarm(argv[++i], entry)) {
@@ -170,10 +183,19 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "imgjit-server: --tile needs --backend cuda (nothing else tiles)\n");
     return 2;
   }
+  if (constants != imgjit::ConstantsMode::kBaked && backend_name != "cuda") {
+    std::fprintf(stderr,
+                 "imgjit-server: --constants needs --backend cuda (nothing else compiles)\n");
+    return 2;
+  }
 #ifdef IMGJIT_ENABLE_CUDA
   if (!imgjit::cuda::is_supported_tile(tile, tile_size)) {
     std::fprintf(stderr, "imgjit-server: --tile must be naive or a tile edge in 1..%d\n",
                  imgjit::cuda::kMaxTileSize);
+    return 2;
+  }
+  if (!imgjit::cuda::is_supported_constants(constants, tile)) {
+    std::fprintf(stderr, "imgjit-server: --constants parameterized needs --tile naive\n");
     return 2;
   }
 #endif
@@ -186,15 +208,17 @@ int main(int argc, char** argv) {
   };
 #ifdef IMGJIT_ENABLE_CUDA
   if (backend_name == "cuda") {
-    factory = [&prewarm, stream_count, tile, tile_size] {
-      auto backend = std::make_unique<imgjit::CudaBackend>(0, stream_count, tile, tile_size);
+    factory = [&prewarm, stream_count, tile, tile_size, constants] {
+      auto backend =
+          std::make_unique<imgjit::CudaBackend>(0, stream_count, tile, tile_size, constants);
       const std::string tile_text =
           tile == imgjit::TileVariant::kNaive
               ? std::string("naive")
               : std::to_string(tile_size) + "x" + std::to_string(tile_size) + " tiled";
-      std::printf("imgjit-server: device 0, %s, %zu stream%s, %s stencils\n",
+      std::printf("imgjit-server: device 0, %s, %zu stream%s, %s stencils, %s constants\n",
                   backend->context().compute_arch().c_str(), backend->stream_count(),
-                  backend->stream_count() == 1 ? "" : "s", tile_text.c_str());
+                  backend->stream_count() == 1 ? "" : "s", tile_text.c_str(),
+                  constants == imgjit::ConstantsMode::kBaked ? "baked" : "parameterized");
       if (!prewarm.empty()) {
         const auto started = std::chrono::steady_clock::now();
         for (const PrewarmEntry& entry : prewarm) {
