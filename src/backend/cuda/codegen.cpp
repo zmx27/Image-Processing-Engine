@@ -40,38 +40,85 @@ std::string float_literal(float value) {
   return literal + "f";
 }
 
+// An op together with its position in the chain. The position names a parameterized
+// op's kernel argument (`p<index>`) and is what GeneratedStage::param_ops reports.
+struct PlannedOp {
+  Op op{};
+  std::size_t index{0};
+};
+
 // One kernel's worth of the chain: the stencil it is built around, plus the pointwise
 // runs folded in before and after it. A stage with no stencil is a pure pointwise
 // kernel, and only a chain containing no stencil at all produces one — "gaussian,
 // invert" folds the invert into the gaussian's epilogue rather than emitting a second
 // kernel for it.
 struct Stage {
-  std::vector<Op> prologue;  // applied at every stencil tap, before the stencil
+  std::vector<PlannedOp> prologue;  // applied at every stencil tap, before the stencil
   bool has_stencil{false};
-  Op stencil{};
-  std::vector<Op> epilogue;  // applied once, to the stencil's result
+  PlannedOp stencil{};
+  std::vector<PlannedOp> epilogue;  // applied once, to the stencil's result
 };
 
 std::vector<Stage> plan_stages(const OpChain& chain) {
   std::vector<Stage> stages;
-  for (const Op& op : chain.ops) {
+  for (std::size_t index = 0; index < chain.ops.size(); ++index) {
+    const PlannedOp planned{chain.ops[index], index};
     if (stages.empty()) {
       stages.emplace_back();
     }
-    if (!op_spec(op.kind).is_stencil) {
+    if (!op_spec(planned.op.kind).is_stencil) {
       Stage& current = stages.back();
       // Prefer attaching backwards: an epilogue runs once per output pixel, a
       // prologue runs once per tap.
-      (current.has_stencil ? current.epilogue : current.prologue).push_back(op);
+      (current.has_stencil ? current.epilogue : current.prologue).push_back(planned);
       continue;
     }
     if (stages.back().has_stencil) {
       stages.emplace_back();
     }
     stages.back().has_stencil = true;
-    stages.back().stencil = op;
+    stages.back().stencil = planned;
   }
   return stages;
+}
+
+// The chain indices of the pointwise ops in `ops` whose parameter is a kernel argument.
+// None when baked, where every parameter is a literal instead.
+std::vector<std::size_t> param_indices(const std::vector<PlannedOp>& ops, bool parameterized) {
+  std::vector<std::size_t> indices;
+  if (parameterized) {
+    for (const PlannedOp& planned : ops) {
+      if (op_spec(planned.op.kind).takes_param) {
+        indices.push_back(planned.index);
+      }
+    }
+  }
+  return indices;
+}
+
+// `prefix` is ", float p" to declare the arguments, or ", p" to pass them on.
+std::string param_list(const std::vector<std::size_t>& indices, const char* prefix) {
+  std::string text;
+  for (const std::size_t index : indices) {
+    text += prefix + std::to_string(index);
+  }
+  return text;
+}
+
+// The chain as the header comment names it. A parameterized source must not depend on
+// any parameter value — every value shares its cache entry, so a printed sigma would be
+// whichever frame compiled it first — so the values are elided.
+std::string chain_comment(const OpChain& chain, bool parameterized) {
+  if (!parameterized) {
+    return canonical_string(chain);
+  }
+  std::string text;
+  for (const Op& op : chain.ops) {
+    text += text.empty() ? "" : ",";
+    text += op_spec(op.kind).name;
+    text += op_spec(op.kind).takes_param ? ":<arg>" : "";
+  }
+  return text;
 }
 
 // Emits a pointwise run over the register array `var[0 .. colors)`.
@@ -81,9 +128,13 @@ std::vector<Stage> plan_stages(const OpChain& chain) {
 // that stayed in float would not be running the same filter. `invert` is written in
 // float here rather than as integer 255-u and still matches the oracle exactly — the
 // true result is an integer and the float error is ~1e-4, far inside the rounding.
-void emit_pointwise(std::ostringstream& out, const std::vector<Op>& ops, int colors,
-                    const char* var, const char* indent) {
-  for (const Op& op : ops) {
+void emit_pointwise(std::ostringstream& out, const std::vector<PlannedOp>& ops, int colors,
+                    const char* var, const char* indent, bool parameterized) {
+  for (const PlannedOp& planned : ops) {
+    const Op& op = planned.op;
+    // A literal when baked; the kernel argument carrying this op's value when not.
+    const std::string param =
+        parameterized ? "p" + std::to_string(planned.index) : float_literal(op.param);
     switch (op.kind) {
       case OpKind::kGrayscale:
         if (colors == 1) {
@@ -107,13 +158,13 @@ void emit_pointwise(std::ostringstream& out, const std::vector<Op>& ops, int col
       case OpKind::kBrightness:
         for (int c = 0; c < colors; ++c) {
           out << indent << var << "[" << c << "] = imgjit_quantize(" << var << "[" << c << "] + "
-              << float_literal(op.param) << ");\n";
+              << param << ");\n";
         }
         break;
       case OpKind::kThreshold:
         for (int c = 0; c < colors; ++c) {
           out << indent << var << "[" << c << "] = imgjit_quantize(" << var << "[" << c
-              << "] >= " << float_literal(op.param) << " ? 1.0f : 0.0f);\n";
+              << "] >= " << param << " ? 1.0f : 0.0f);\n";
         }
         break;
       case OpKind::kGaussian:
@@ -135,18 +186,20 @@ std::string zero_initializer(int colors) {
 // folded in. Emitted only for stencil stages — it is the thing the stencil's tap loop
 // calls, and folding the prologue in here is what "pointwise ops fuse at zero memory
 // cost" means concretely.
+// Parameterized, the prologue's values arrive as trailing `float p<index>` arguments.
 void emit_tap_function(std::ostringstream& out, const std::string& name, const Stage& stage,
-                       int channels, int colors) {
+                       int channels, int colors, bool parameterized,
+                       const std::string& prologue_params) {
   out << "\n__device__ __forceinline__ void " << name << "_tap(\n"
       << "    const unsigned char* __restrict__ src, int x, int y, int width, int height,\n"
-      << "    float* v) {\n"
+      << "    float* v" << prologue_params << ") {\n"
       << "  const int sx = imgjit_clamp_coord(x, width);\n"
       << "  const int sy = imgjit_clamp_coord(y, height);\n"
       << "  const int i = (sy * width + sx) * " << channels << ";\n";
   for (int c = 0; c < colors; ++c) {
     out << "  v[" << c << "] = imgjit_load_sample(src[i + " << c << "]);\n";
   }
-  emit_pointwise(out, stage.prologue, colors, "v", "  ");
+  emit_pointwise(out, stage.prologue, colors, "v", "  ", parameterized);
   out << "}\n";
 }
 
@@ -227,10 +280,12 @@ void emit_tile_load(std::ostringstream& out, const std::string& name, int radius
 // a clamped global load with the prologue recomputed, once per tap. Tiled: a read out
 // of the staged tile. Everything around this fetch is the same text in both variants,
 // which is what keeps tiling a memory optimization rather than a numerics change.
-void emit_fetch(std::ostringstream& out, const std::string& name, int colors, bool tiled) {
+void emit_fetch(std::ostringstream& out, const std::string& name, int colors, bool tiled,
+                const std::string& tap_args) {
   out << "      float t[" << colors << "];\n";
   if (!tiled) {
-    out << "      " << name << "_tap(src, x + dx, y + dy, width, height, t);\n";
+    out << "      " << name << "_tap(src, x + dx, y + dy, width, height, t" << tap_args
+        << ");\n";
     return;
   }
   for (int c = 0; c < colors; ++c) {
@@ -242,9 +297,16 @@ void emit_fetch(std::ostringstream& out, const std::string& name, int colors, bo
 // and the 2D weight formed as (wy * wx) before it multiplies the sample — the oracle's
 // `sum += wy * wx * sample` associates the same way. Only FMA contraction is left to
 // separate them, which is what the <=1 LSB tolerance is for.
+//
+// `runtime_radius` is a parameterized gaussian: its radius and weights are the kernel's
+// `radius` and `taps` arguments rather than literals, so the tap loop's bounds are
+// dynamic and NVRTC cannot unroll it — the cost the Phase 8 A/B measures. `tap_args`
+// passes a parameterized prologue's values on to the tap helper.
 void emit_stencil_body(std::ostringstream& out, const std::string& name, const Op& stencil,
-                       int radius, int colors, bool tiled) {
-  const std::string radius_text = std::to_string(radius);
+                       int radius, int colors, bool tiled, bool runtime_radius,
+                       const std::string& tap_args) {
+  const std::string radius_text = runtime_radius ? "radius" : std::to_string(radius);
+  const std::string weights = runtime_radius ? "taps.w" : name + "_w";
 
   if (tiled) {
     // No clamping from here on: the apron already holds every neighbour, edge-clamped
@@ -257,9 +319,9 @@ void emit_stencil_body(std::ostringstream& out, const std::string& name, const O
     out << "  float acc[" << colors << "] = " << zero_initializer(colors) << ";\n"
         << "  for (int dy = -" << radius_text << "; dy <= " << radius_text << "; ++dy) {\n"
         << "    for (int dx = -" << radius_text << "; dx <= " << radius_text << "; ++dx) {\n";
-    emit_fetch(out, name, colors, tiled);
-    out << "      const float w = " << name << "_w[dy + " << radius_text << "] * " << name
-        << "_w[dx + " << radius_text << "];\n";
+    emit_fetch(out, name, colors, tiled, tap_args);
+    out << "      const float w = " << weights << "[dy + " << radius_text << "] * " << weights
+        << "[dx + " << radius_text << "];\n";
     for (int c = 0; c < colors; ++c) {
       out << "      acc[" << c << "] += w * t[" << c << "];\n";
     }
@@ -274,7 +336,7 @@ void emit_stencil_body(std::ostringstream& out, const std::string& name, const O
       << "  float gy[" << colors << "] = " << zero_initializer(colors) << ";\n"
       << "  for (int dy = -1; dy <= 1; ++dy) {\n"
       << "    for (int dx = -1; dx <= 1; ++dx) {\n";
-  emit_fetch(out, name, colors, tiled);
+  emit_fetch(out, name, colors, tiled, tap_args);
   out << "      const int k = (dy + 1) * 3 + (dx + 1);\n";
   for (int c = 0; c < colors; ++c) {
     out << "      gx[" << c << "] += " << name << "_gx[k] * t[" << c << "];\n"
@@ -287,24 +349,39 @@ void emit_stencil_body(std::ostringstream& out, const std::string& name, const O
   }
 }
 
-// Returns the block edge the stage must be launched with (GeneratedStage::block_dim).
 // `tile_size` is 0 for the naive variant.
-int emit_stage(std::ostringstream& out, const std::string& name, const Stage& stage, int channels,
-               int colors, int tile_size) {
+GeneratedStage emit_stage(std::ostringstream& out, const std::string& name, const Stage& stage,
+                          int channels, int colors, int tile_size, bool parameterized) {
+  GeneratedStage generated;
+  generated.kernel_name = name;
+  generated.is_stencil = stage.has_stencil;
+
+  // Of the two stencils only gaussian has a parameter. Sobel's 3x3 is the op's
+  // definition, so it stays a literal in either mode.
+  const bool runtime_radius =
+      parameterized && stage.has_stencil && stage.stencil.op.kind == OpKind::kGaussian;
+  const std::vector<std::size_t> prologue_params = param_indices(stage.prologue, parameterized);
+  const std::vector<std::size_t> epilogue_params = param_indices(stage.epilogue, parameterized);
+
   int radius = 0;
   if (stage.has_stencil) {
-    radius = emit_stencil_constants(out, name, stage.stencil);
-    emit_tap_function(out, name, stage, channels, colors);
+    if (!runtime_radius) {
+      radius = emit_stencil_constants(out, name, stage.stencil.op);
+    }
+    emit_tap_function(out, name, stage, channels, colors, parameterized,
+                      param_list(prologue_params, ", float p"));
   }
 
   // Only a stencil has neighbours to share, so a pointwise-only stage is naive in
   // either variant.
   const bool tiled = stage.has_stencil && tile_size > 0;
   const int block_dim = tiled ? tile_size : kNaiveBlockDim;
+  generated.block_dim = block_dim;
 
-  // Every stage has the same signature, so the executor can ping-pong two buffers
-  // through the whole chain without knowing what any stage does. Dimensions are
-  // parameters here and nowhere else — that is CLAUDE.md invariant 4 made structural.
+  // Every stage starts with the same four arguments, so the executor can ping-pong two
+  // buffers through the whole chain without knowing what any stage does; a
+  // parameterized stage appends its values after them, in param_ops order. Dimensions
+  // are parameters here and nowhere else — that is CLAUDE.md invariant 4 made structural.
   out << "\nextern \"C\" __global__ void ";
   if (tiled) {
     // Caps registers so that tile_size^2 threads always fit on an SM. Without it a 32x32
@@ -315,7 +392,17 @@ int emit_stage(std::ostringstream& out, const std::string& name, const Stage& st
   }
   out << name << "(\n"
       << "    const unsigned char* __restrict__ src, unsigned char* __restrict__ dst,\n"
-      << "    int width, int height) {\n";
+      << "    int width, int height";
+  if (runtime_radius) {
+    out << ", int radius, imgjit_gaussian_taps taps";
+    generated.param_ops.push_back(stage.stencil.index);
+  }
+  out << param_list(prologue_params, ", float p") << param_list(epilogue_params, ", float p")
+      << ") {\n";
+  generated.param_ops.insert(generated.param_ops.end(), prologue_params.begin(),
+                             prologue_params.end());
+  generated.param_ops.insert(generated.param_ops.end(), epilogue_params.begin(),
+                             epilogue_params.end());
   if (tiled) {
     emit_tile_load(out, name, radius, tile_size, colors);
   }
@@ -329,12 +416,13 @@ int emit_stage(std::ostringstream& out, const std::string& name, const Stage& st
     for (int c = 0; c < colors; ++c) {
       out << "  v[" << c << "] = imgjit_load_sample(src[i + " << c << "]);\n";
     }
-    emit_pointwise(out, stage.prologue, colors, "v", "  ");
+    emit_pointwise(out, stage.prologue, colors, "v", "  ", parameterized);
   } else {
-    emit_stencil_body(out, name, stage.stencil, radius, colors, tiled);
+    emit_stencil_body(out, name, stage.stencil.op, radius, colors, tiled, runtime_radius,
+                      param_list(prologue_params, ", p"));
   }
 
-  emit_pointwise(out, stage.epilogue, colors, "v", "  ");
+  emit_pointwise(out, stage.epilogue, colors, "v", "  ", parameterized);
 
   for (int c = 0; c < colors; ++c) {
     out << "  dst[i + " << c << "] = imgjit_store_sample(v[" << c << "]);\n";
@@ -345,7 +433,7 @@ int emit_stage(std::ostringstream& out, const std::string& name, const Stage& st
     out << "  dst[i + 3] = src[i + 3];  // alpha passes through every op untouched\n";
   }
   out << "}\n";
-  return block_dim;
+  return generated;
 }
 
 }  // namespace
@@ -355,6 +443,13 @@ bool is_supported_tile(const TileVariant tile, const int tile_size) {
     return tile_size == 0;
   }
   return tile == TileVariant::kTiled && tile_size >= 1 && tile_size <= kMaxTileSize;
+}
+
+bool is_supported_constants(const ConstantsMode constants, const TileVariant tile) {
+  if (constants == ConstantsMode::kBaked) {
+    return true;
+  }
+  return constants == ConstantsMode::kParameterized && tile == TileVariant::kNaive;
 }
 
 GeneratedProgram emit_cuda_source(const KernelKey& key) {
@@ -368,17 +463,20 @@ GeneratedProgram emit_cuda_source(const KernelKey& key) {
                                 " (naive takes 0, tiled takes 1-" + std::to_string(kMaxTileSize) +
                                 ")");
   }
-  if (key.constants != ConstantsMode::kBaked) {
-    throw std::invalid_argument("emit_cuda_source: parameterized constants arrive in Phase 8");
+  if (!is_supported_constants(key.constants, key.tile)) {
+    throw std::invalid_argument(
+        "emit_cuda_source: parameterized constants need naive stencils — a tiled stage "
+        "sizes its __shared__ array from the stencil radius, which is only known at launch");
   }
 
   const int colors = cpu::color_channels(key.channels);
   const std::vector<Stage> stages = plan_stages(key.chain);
   const int tile_size = key.tile == TileVariant::kTiled ? key.tile_size : 0;
+  const bool parameterized = key.constants == ConstantsMode::kParameterized;
 
   std::ostringstream out;
   out << "// Generated by imgjit codegen (src/backend/cuda/codegen.cpp) — do not edit.\n"
-      << "// chain:    \"" << canonical_string(key.chain) << "\"\n"
+      << "// chain:    \"" << chain_comment(key.chain, parameterized) << "\"\n"
       << "// channels: " << key.channels << " (" << colors << " colour + "
       << (key.channels == 4 ? 1 : 0) << " alpha)\n"
       << "// stages:   " << stages.size() << "\n";
@@ -388,18 +486,27 @@ GeneratedProgram emit_cuda_source(const KernelKey& key) {
     out << "// tile:     " << tile_size << "x" << tile_size
         << " shared-memory tile on stencil stages\n";
   }
+  if (parameterized) {
+    out << "// constants: parameterized — every op parameter is a kernel argument, so this\n"
+        << "// source serves every value of them (imgjit/core/kernel_key.h).\n";
+  }
   out << "//\n"
       << "// Width and height are absent from this source by construction: they are\n"
       << "// launch arguments, so one compile serves every resolution (CLAUDE.md\n"
       << "// invariant 4).\n"
       << kKernelPrelude;
+  if (parameterized) {
+    // Passed by value, so it lands in the kernel's parameter space like any scalar
+    // argument. Sized for the widest gaussian; a narrower one leaves the tail unread.
+    out << "\nstruct imgjit_gaussian_taps { float w[" << kMaxGaussianTaps << "]; };\n";
+  }
 
   GeneratedProgram program;
   program.stages.reserve(stages.size());
   for (std::size_t i = 0; i < stages.size(); ++i) {
     const std::string name = kStagePrefix + std::to_string(i);
-    const int block_dim = emit_stage(out, name, stages[i], key.channels, colors, tile_size);
-    program.stages.push_back({name, stages[i].has_stencil, block_dim});
+    program.stages.push_back(
+        emit_stage(out, name, stages[i], key.channels, colors, tile_size, parameterized));
   }
 
   program.source = out.str();

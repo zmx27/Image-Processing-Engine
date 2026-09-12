@@ -19,6 +19,7 @@
 // a wrong benchmark number, not a crash. Note what the signature therefore cannot
 // take: width and height. They are launch arguments.
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -39,18 +40,34 @@ inline constexpr int kMaxTileSize = 32;
 // ignored, so one kernel can never sit under two keys.
 bool is_supported_tile(TileVariant tile, int tile_size);
 
+// The widest gaussian the op set allows: sigma 4 is radius 12, so 2*12 + 1 weights per
+// axis. A parameterized gaussian takes its weights as one struct of this many floats,
+// because a kernel argument's size is fixed when the kernel is compiled.
+inline constexpr int kMaxGaussianTaps = 25;
+
+// The constants half of a KernelKey that codegen can emit. Parameterized is naive-only:
+// a tiled stage sizes its __shared__ array from the stencil radius at compile time, and
+// a parameterized kernel does not learn the radius until launch.
+bool is_supported_constants(ConstantsMode constants, TileVariant tile);
+
 struct GeneratedStage {
   // The `extern "C" __global__` entry point, e.g. "imgjit_stage0".
   std::string kernel_name;
   // True when this stage is built around a gaussian or sobel. Not needed to launch
-  // it — every stage has the same signature — but it is what the codegen tests assert
-  // the fusion plan against.
+  // it, but it is what the codegen tests assert the fusion plan against.
   bool is_stencil{false};
   // The square block edge this stage MUST be launched with. Decided here rather than by
   // the executor because a tiled stage's correctness depends on it: its __shared__ tile
   // and its index arithmetic are baked for exactly this many threads per side, and a
   // launch with any other block would read apron cells that were never loaded.
   int block_dim{kNaiveBlockDim};
+  // Parameterized mode only; empty when baked. Indices into the key's chain whose
+  // parameters this stage takes as extra kernel arguments after (src, dst, width,
+  // height), in signature order. A gaussian index is two arguments — `int radius`, then
+  // a struct of kMaxGaussianTaps floats holding its 1D weights — and any other index is
+  // one `float`. The values must come from each frame's own chain at launch: the cached
+  // kernel was compiled for whichever frame first asked for this chain shape.
+  std::vector<std::size_t> param_ops;
 };
 
 struct GeneratedProgram {
@@ -81,9 +98,17 @@ struct GeneratedProgram {
 // come from and never the arithmetic. Pointwise-only stages have no neighbours to share
 // and are emitted naive in either variant.
 //
+// PARAMETERIZED CONSTANTS (docs/PLAN.md Phase 8). The same kernels, with every op
+// parameter — the gaussian's radius and weights, brightness, threshold — read from a
+// kernel argument instead of a literal, so the gaussian's tap loop has runtime bounds
+// NVRTC cannot unroll. The source then contains no parameter value at all, which is
+// why such keys ignore parameters: one compile serves every sigma. The channel count
+// and sobel's fixed 3x3 coefficients stay literals — they are the kernel's shape, not
+// something a client chooses.
+//
 // Throws std::invalid_argument on a key whose channel count or tile is unsupported
-// (is_supported_tile), or whose constants field is set to the variant reserved for
-// Phase 8.
+// (is_supported_tile), or whose constants mode cannot be combined with its tile
+// (is_supported_constants).
 GeneratedProgram emit_cuda_source(const KernelKey& key);
 
 }  // namespace imgjit::cuda
