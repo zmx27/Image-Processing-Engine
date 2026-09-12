@@ -26,9 +26,14 @@ namespace imgjit {
 // collide them onto one key.
 enum class TileVariant : std::uint8_t { kNaive = 0, kTiled = 1 };
 
-// Phase 8's A/B axis. Same kernel, constants baked as literals versus passed as
-// parameters — if this is not in the key, the parameterized run silently reuses the
-// baked kernel and the benchmark measures nothing.
+// Phase 8's A/B axis. Same kernel, op parameters (gaussian sigma, brightness,
+// threshold) baked as literals versus passed as kernel arguments at launch — if this is
+// not in the key, the parameterized run silently reuses the baked kernel and the
+// benchmark measures nothing.
+//
+// Parameterized, the values are no longer codegen inputs, so invariant 4's "and nothing
+// else" takes them OUT of the key: gaussian:1.4 and gaussian:3 share one kernel. Op
+// kinds and order still count in both modes — they decide the kernel's structure.
 enum class ConstantsMode : std::uint8_t { kBaked = 0, kParameterized = 1 };
 
 struct KernelKey {
@@ -39,15 +44,17 @@ struct KernelKey {
   // for naive — codegen refuses a naive key with a size, so one kernel has one key.
   TileVariant tile{TileVariant::kNaive};
   int tile_size{0};
-  // Reserved for Phase 8; the default is what every earlier phase emits.
+  // Phase 8; the default is what every earlier phase emits.
   ConstantsMode constants{ConstantsMode::kBaked};
 
-  friend bool operator==(const KernelKey&, const KernelKey&) = default;
+  // Not defaulted: a parameterized key ignores the op parameters, and equality has to
+  // agree with the hash or the cache would hold two entries for one kernel.
+  friend bool operator==(const KernelKey& lhs, const KernelKey& rhs);
 };
 
 // 64-bit FNV-1a over a byte encoding of the fields above. Parameters are encoded from
 // their quantized integer hundredths, not their float bits, so +0.0 and -0.0 cannot
-// produce two entries for one kernel.
+// produce two entries for one kernel — and are skipped entirely for a parameterized key.
 std::uint64_t hash_kernel_key(const KernelKey& key);
 
 }  // namespace imgjit
