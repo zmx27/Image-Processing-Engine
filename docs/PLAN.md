@@ -469,35 +469,55 @@ around the stages, excluding copies and compile, and is a clean per-frame number
       baked-vs-parameterized constants (the constants mode must already be a `KernelKey` input —
       see Phase 3, or the parameterized run silently reuses the baked kernel)
 - [x] Chain lengths (1, 2, 4, 6 ops); report FPS, p50/p99 round-trip latency
-- [ ] Sweep 512² → 4K, report FPS and GB/s — **first pass invalidated, rerun in progress.** The
-      original run held concurrency fixed at 8 frames in flight across every resolution;
-      `imgjit-bench` is a closed loop, so its fps is mechanically tied to latency at fixed
-      concurrency (Little's Law) whether or not the GPU is the bottleneck, and every recorded row
-      landed within ~15% of that theoretical cap — meaning the "peak Mpx/s at 1024²" shape drawn
-      from it cannot be told apart from "8 in flight did not saturate the pipeline at that size."
-      Withdrawn from `bench/phase8_results.md` §2 rather than left standing. The rerun
-      (`colab/run.ipynb`, the dedicated resolution cell) sizes the slot to each resolution's real
-      frame and raises concurrency per resolution until `BackendStats::submit_stalls` goes
-      nonzero — a direct signal the GPU worker itself is the bottleneck, not an inference from an
-      fps ratio.
+- [x] Sweep 512² → 4K, report FPS and GB/s. **First pass invalidated and rerun** — see below.
 
-      **Recorded on Colab (T4), written up in `bench/phase8_results.md`.** Cell 21 of
-      `colab/run.ipynb` runs six focused sweeps (one axis each, the rest pinned — a cartesian
-      product of six axes is hundreds of runs and no clearer) and writes `baseline_phase8.csv`
-      plus `phase8_matrix.csv`, the latter joining each row to the server configuration and the
-      two server-side instruments so the results table needs no label decoding. `BackendStats`
-      gained `jit_compiles` for this: the compile count was only ever printed at prewarm time,
-      and the cold-vs-warm and constants axes are both read off it after a run. (Named for the
-      technique, not the compiler — `nvrtc` in a portable header trips invariant 1's grep.)
+      **Two full sessions recorded on Colab (T4), written up in `bench/phase8_results.md`.**
+      Cell 22 of `colab/run.ipynb` runs five focused sweeps (constants, cache, tile×streams,
+      fusion, chain length — one axis each, the rest pinned) into `baseline_phase8.csv` /
+      `phase8_matrix.csv`; cell 24 is the resolution sweep, into `phase8_resolution.csv` /
+      `phase8_resolution_summary.csv`. `BackendStats` gained `jit_compiles` (compile count was
+      only ever printed at prewarm time) and the resolution cell reads `submit_stalls` directly
+      off the shutdown line. (`jit_compiles`, not `nvrtc_compiles` — named for the technique, not
+      the compiler, since the latter in a portable header trips invariant 1's grep.)
 
-      Headline numbers: **parameterized constants cost 1.36–1.42x kernel time and buy a 3.1x
-      lower worst first frame** on a cold cache with four distinct sigmas (4 compiles → 1),
-      break-even ≈110 frames per distinct value; **tile 16 at one stream is the fastest
-      configuration measured** (1.80x the naive baseline), with streams adding nothing on top of
-      tiling; NVRTC compile measured at ≈97 ms, inside `ARCHITECTURE.md`'s "~50–200 ms" claim.
-      The harness's own repeatability is 3.5% on kernel time (§0), which is stated first because
-      it is the bar every other difference has to clear — and it qualifies Phase 7's ~3% tiled
-      Sobel regression down to "not measurably faster".
+      **The resolution sweep's first pass was invalidated by its own methodology and rerun.** It
+      held concurrency fixed at 8 frames in flight for every resolution; `imgjit-bench` is a
+      closed loop, so fps is mechanically tied to latency at fixed concurrency (Little's Law)
+      whether or not the GPU is the bottleneck, and every recorded row landed within ~15% of that
+      theoretical cap — the "peak Mpx/s at 1024²" shape drawn from it could not be told apart from
+      "8 in flight did not saturate the pipeline at every size." Withdrawn rather than left
+      standing. The rerun sizes the slot to each resolution's real frame and raises concurrency
+      until `submit_stalls` goes nonzero — a direct signal of GPU-side contention, not an
+      inference from an fps ratio. Confirmed GPU-bound at every resolution tested; the "peak at
+      1024²" claim did not survive the fix — 512² and 1024² are now within 1.1% of each other, and
+      the real falloff is at 2048²+ (`bench/phase8_results.md` §2).
+
+      **A second full session also caught something a single run could not: a headline finding
+      that reversed sign.** Session 1 measured tile16 at `--streams 4` as −3.8% versus tile16 at
+      `--streams 1` and called it noise; session 2 measures the identical configuration at
+      **+28.9%**, making tile16/streams4 the fastest full-chain config in the matrix rather than
+      tile16/streams1. Both sessions' raw numbers are kept side by side in
+      `bench/phase8_results.md` §0 and §3 rather than one silently overwriting the other, and the
+      tile×streams interaction is recorded as **not established** — direction and magnitude both
+      open — pending a third session. Five of the seven cross-session comparisons made *do*
+      replicate closely (parameterized penalty, tiled speedup, fusion cost); this is the one that
+      did not, and it is exactly the kind of thing `bench/phase8_results.md` §0 exists to catch.
+
+      Headline numbers, both sessions agreeing unless noted: **parameterized constants cost
+      1.36–1.42x kernel time** and **buy a 39–68% lower worst-first-frame latency** (a real but
+      session-dependent magnitude — see below) on a cold cache with four distinct sigmas, which
+      always compile 4x baked vs 1x parameterized (a discrete count, identical both sessions);
+      **tiling gets 2.65–2.68x kernel time** on the showcase chain; **streams add +11–17% on the
+      naive kernel** (replicates) but the streams×tiling interaction does **not** (see above);
+      fusing a prologue before a stencil costs **1.26–1.28x** more kernel time, not less; an NVRTC
+      compile costs tens-to-low-hundreds of ms, consistent with `ARCHITECTURE.md`'s "~50–200 ms"
+      claim, though the specific per-compile figure derived in session 1 (~97 ms baked vs ~63 ms
+      parameterized) reversed in session 2 (~43 ms vs ~84 ms) and is retracted as unreliable.
+      The harness's own kernel-time repeatability is 3.5% *within* one session but 9.2% has now
+      been observed *within* a second one — treat 9.2% as the current floor a difference must
+      clear. This also qualifies Phase 7's ~3% tiled-Sobel regression further toward
+      "not measurably faster" (already noted there after session 1; unchanged by session 2, which
+      did not retest Sobel tiling).
 - [ ] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
       context recreation holds under fault, and that the server survives
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior

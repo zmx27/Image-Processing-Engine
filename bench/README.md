@@ -119,24 +119,27 @@ the bottleneck and a faster kernel should show up in `fps` directly.
 
 ## Recording the Phase 8 matrix
 
-Phase 8 widens the same harness over the orthogonal matrix. Cell 21 of `colab/run.ipynb` runs it
-as **six focused sweeps** — each varying one axis with the others pinned — rather than one
-cartesian product, which at six axes would be hundreds of runs and no clearer about any of them:
+Phase 8 widens the same harness over the orthogonal matrix, across **two notebook cells**. Cell 22
+of `colab/run.ipynb` runs **five focused sweeps** — each varying one axis with the others pinned —
+into `baseline_phase8.csv` / `phase8_matrix.csv`:
 
 | Sweep | Axis | Read off |
 |---|---|---|
-| `resolution` | 512² → 4K | `fps`, `gb_per_s` |
 | `constants` | baked vs parameterized | `mean_kernel_ms` |
 | `cache` | cold vs warm, four different sigmas | `nvrtc_compiles`, `cold_first_ms` |
 | `tile_x_streams` | naive/tiled × 1/4 streams | `mean_kernel_ms`, `fps` |
 | `fusion` | four one-op chains vs one fused chain | `mean_kernel_ms` |
 | `chain_length` | 1, 2, 4, 6 ops | `mean_kernel_ms`, `fps` |
 
-It writes two files. `baseline_phase8.csv` is what `imgjit-bench` appends, exactly as in every
-earlier phase. `phase8_matrix.csv` joins each of those rows to the configuration the server was
-started with plus the two server-side instruments (`mean_kernel_ms`, `nvrtc_compiles`), so the
-README results table is built from one file with real axis columns instead of by decoding label
-strings — which is what the earlier phases did, and what stops scaling at six axes.
+Cell 24 is the resolution sweep on its own, into `phase8_resolution.csv` /
+`phase8_resolution_summary.csv` — it needs a per-resolution concurrency check the other five
+sweeps do not (see below) and was split out after the first version of it produced numbers that
+had to be withdrawn.
+
+`phase8_matrix.csv` joins each `imgjit-bench` row to the configuration the server was started with
+plus the server-side instruments (`mean_kernel_ms`, `nvrtc_compiles`), so the results table is
+built from one file with real axis columns instead of by decoding label strings — which is what
+earlier phases did, and what stops scaling past a couple of axes.
 
 **The `constants` axis has a cost side and a benefit side, and only one of them is a speed.**
 Parameterized kernels take each op's parameters as launch arguments rather than baked literals, so
@@ -155,17 +158,37 @@ fusion is structural — so the stand-in is the same four ops sent as four separ
 and the comparison is the *sum of their kernel times* against the fused chain's. Four chains are
 also four round trips, which is why the summary compares `mean_kernel_ms` and never `fps`.
 
-**Measured result** (`bench/phase8_results.md`, Colab T4): parameterized constants cost
-**1.36-1.42x** kernel time and buy **4 compiles → 1** with a 3.1x lower worst first frame on a
-cold cache, break-even ≈110 frames per distinct parameter value. **Tile 16 at one stream is the
-fastest configuration in the matrix** (1.80x the naive baseline); streams add +11% on naive and
-nothing on top of tiling. Fusion is **1.28x slower** in kernel time for the showcase chain, because
-a prologue re-runs at every stencil tap. An NVRTC compile measured ≈97 ms.
+**The resolution sweep needs its own concurrency check, and the other five don't.**
+`imgjit-bench` is a closed loop: throughput is mechanically tied to latency at fixed concurrency
+(Little's Law), whether or not the GPU is the bottleneck. The other five sweeps hold concurrency
+fixed across both sides of every comparison, so relative differences (baked vs parameterized, tile
+vs naive, …) are unaffected. Resolution compares *absolute* throughput across sizes, where that
+does not cancel — its first run used a fixed 8-frame budget and every row landed within ~15% of
+the theoretical cap, so the results were unusable and had to be withdrawn (`bench/phase8_results.md`
+§2). The fix sizes the slot to each resolution's real frame and raises concurrency until
+`BackendStats::submit_stalls` goes nonzero — a direct sign of GPU-side contention rather than an
+inference from an fps ratio.
 
-**Read §0 of the results before any single number.** One configuration appears in three sweeps, so
-it was measured three times: the spread is **3.5% on kernel time, 1.6% on FPS**. That is the
-harness's repeatability and the bar a difference must clear to be real — which is also why the
-Phase 7 tiled-Sobel result is restated there as "not measurably faster" rather than a regression.
+**Measured, over two full sessions** (`bench/phase8_results.md`, Colab T4) — reported as a range
+where the two disagree, since a single run cannot tell you which of its numbers to trust:
+parameterized constants cost **1.36–1.42x** kernel time and buy **4 compiles → 1** on a cold cache
+with four distinct sigmas (a discrete count, identical both times), worth a **39–68%** lower worst
+first frame (a real but session-dependent magnitude — the per-compile-ms figure derived from
+session 1 alone reversed sign in session 2 and is not reported). Tiling gets **2.65–2.68x** kernel
+time on the showcase chain, replicating closely. Fusing a prologue before a stencil costs
+**1.26–1.28x** more kernel time, also replicating closely. **Streams on top of tiling reversed
+sign** between sessions (−3.8% then +28.9%) and is recorded as unresolved, not as a number — this
+is the one comparison of seven that did not replicate, and it directly overturned the first
+session's "tile 16 at one stream is the fastest configuration" headline (tile16 at *four* streams
+now holds that spot). Resolution, once genuinely GPU-bound: 512² and 1024² are within 1.1% of each
+other, with the real falloff starting at 2048²+ — not the "peak at 1024²" shape the withdrawn first
+pass suggested.
+
+**Read §0 of the results before any single number.** Within one session, one configuration
+appearing in four sweeps gave a 9.2% kernel-time spread (2.1% on FPS) — worse repeatability than
+the 3.5%/1.6% measured in the first session. Treat 9.2% as the current floor a kernel-time
+difference must clear to be real, which is also why the Phase 7 tiled-Sobel result is restated
+there as "not measurably faster" rather than a regression.
 
 ## Reading the columns
 

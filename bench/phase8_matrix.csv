@@ -1,26 +1,22 @@
 label,sweep,chains,chain_ops,tile,streams,constants,prewarmed,width,height,channels,fps,req_mb_per_s,gb_per_s,p50_ms,p99_ms,cold_first_ms,mean_kernel_ms,mean_in_flight,nvrtc_compiles,failures
-phase8_res512,resolution,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,4,baked,yes,512,512,3,1235.69,926.766,0.905,5.45165,15.9787,21.3795,2.597,3.39,1,0
-phase8_res1024,resolution,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,4,baked,yes,1024,1024,3,343.622,1030.87,1.007,21.9196,33.3781,37.7516,8.718,3.43,1,0
-phase8_res2048,resolution,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,4,baked,yes,2048,2048,3,67.4405,809.286,0.790,121.48,154.216,87.1495,32.646,2.70,1,0
-phase8_res4096,resolution,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,4,baked,yes,4096,4096,3,12.6766,608.474,0.594,623.295,698.168,386.61,158.192,2.50,1,0
-phase8_gaussian_baked,constants,gaussian:1.4,1,naive,1,baked,yes,1024,1024,3,354.113,1062.34,1.037,88.9011,96.4525,56.9526,1.632,1.00,1,0
-phase8_full_baked,constants,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,275.253,825.76,0.806,114.874,123.024,59.6038,2.430,1.00,1,0
-phase8_gaussian_parameterized,constants,gaussian:1.4,1,naive,1,parameterized,yes,1024,1024,3,277.201,831.603,0.812,111.707,125.103,64.7358,2.310,1.00,1,0
-phase8_full_parameterized,constants,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,parameterized,yes,1024,1024,3,222.544,667.631,0.652,142.592,152.74,56.8485,3.300,1.00,1,0
-phase8_sigmas_cold_baked,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,baked,no,1024,1024,3,233.43,700.291,0.684,126.227,468.44,431.572,2.627,1.00,4,0
-phase8_sigmas_cold_parameterized,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,parameterized,no,1024,1024,3,194.917,584.752,0.571,161.429,197.978,140.053,3.863,1.00,1,0
-phase8_sigmas_warm_baked,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,baked,yes,1024,1024,3,247.716,743.148,0.726,127.955,139.278,47.8289,2.655,1.00,4,0
-phase8_sigmas_warm_parameterized,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,parameterized,yes,1024,1024,3,195.859,587.576,0.574,162.102,169.941,77.0529,3.897,1.00,1,0
-phase8_full_naive_streams1,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,260.636,781.909,0.764,121.593,131.791,48.1797,2.509,1.00,1,0
-phase8_full_naive_streams4,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,4,baked,yes,1024,1024,3,289.628,868.883,0.849,110.971,120.989,66.8118,9.894,2.71,1,0
-phase8_full_tile16_streams1,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,16,1,baked,yes,1024,1024,3,468.932,1406.8,1.374,65.8211,78.5931,59.4146,0.948,1.00,1,0
-phase8_full_tile16_streams4,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,16,4,baked,yes,1024,1024,3,451.025,1353.08,1.321,68.6365,95.4517,57.3115,2.485,2.55,1,0
-phase8_unfused_grayscale,fusion,grayscale,1,naive,1,baked,yes,1024,1024,3,516.156,1548.47,1.512,55.0525,90.7928,113.079,0.051,1.00,1,0
-phase8_unfused_gaussian,fusion,gaussian:1.4,1,naive,1,baked,yes,1024,1024,3,339.373,1018.12,0.994,92.2229,101.618,60.1263,1.742,1.00,1,0
-phase8_unfused_sobel,fusion,sobel,1,naive,1,baked,yes,1024,1024,3,581.345,1744.04,1.703,52.9489,67.1051,48.3238,0.147,1.00,1,0
-phase8_unfused_threshold,fusion,threshold:0.3,1,naive,1,baked,yes,1024,1024,3,508.393,1525.18,1.489,63.654,78.9829,45.2525,0.088,1.00,1,0
-phase8_fused_full,fusion,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,260.624,781.873,0.764,119.456,160.154,104.828,2.598,1.00,1,0
-phase8_len1,chain_length,invert,1,naive,1,baked,yes,1024,1024,3,592.812,1778.44,1.737,52.2621,65.6673,51.5639,0.051,1.00,1,0
-phase8_len2,chain_length,"grayscale,sobel",2,naive,1,baked,yes,1024,1024,3,565.279,1695.84,1.656,54.0748,85.8163,51.658,0.218,1.00,1,0
-phase8_len4,chain_length,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,256.579,769.736,0.752,122.374,132.436,68.3683,2.546,1.00,1,0
-phase8_len6,chain_length,"grayscale,brightness:0.1,gaussian:1.4,invert,sobel,threshold:0.3",6,naive,1,baked,yes,1024,1024,3,225.424,676.271,0.660,141.086,145.179,51.5974,3.232,1.00,1,0
+phase8_gaussian_baked,constants,gaussian:1.4,1,naive,1,baked,yes,1024,1024,3,345.105,1035.31,1.011,88.3234,136.121,60.0245,1.650,1.00,1,0
+phase8_full_baked,constants,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,267.245,801.736,0.783,116.267,161.015,114.827,2.305,1.00,1,0
+phase8_gaussian_parameterized,constants,gaussian:1.4,1,naive,1,parameterized,yes,1024,1024,3,288.7,866.1,0.846,109.678,114.227,68.9161,2.247,1.00,1,0
+phase8_full_parameterized,constants,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,parameterized,yes,1024,1024,3,224.44,673.321,0.658,140.998,152.353,61.6845,3.183,1.00,1,0
+phase8_sigmas_cold_baked,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,baked,no,1024,1024,3,252.478,757.434,0.740,120.431,288.761,234.222,2.601,1.00,4,0
+phase8_sigmas_cold_parameterized,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,parameterized,no,1024,1024,3,197.273,591.819,0.578,158.274,193.336,141.924,3.745,1.00,1,0
+phase8_sigmas_warm_baked,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,baked,yes,1024,1024,3,261.787,785.361,0.767,121.019,127.27,63.1815,2.635,1.00,4,0
+phase8_sigmas_warm_parameterized,cache,gaussian:0.8 | gaussian:1.4 | gaussian:2.2 | gaussian:3,1,naive,1,parameterized,yes,1024,1024,3,198.593,595.778,0.582,159.05,171.566,57.9567,3.783,1.00,1,0
+phase8_full_naive_streams1,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,272.796,818.387,0.799,115.669,124.559,102.472,2.473,1.00,1,0
+phase8_full_naive_streams4,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,4,baked,yes,1024,1024,3,319.029,957.087,0.935,94.5279,116.378,61.8473,9.712,3.35,1,0
+phase8_full_tile16_streams1,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,16,1,baked,yes,1024,1024,3,391.177,1173.53,1.146,82.4378,118.328,52.607,0.923,1.00,1,0
+phase8_full_tile16_streams4,tile_x_streams,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,16,4,baked,yes,1024,1024,3,504.192,1512.58,1.477,61.431,88.3235,44.4602,2.554,2.56,1,0
+phase8_unfused_grayscale,fusion,grayscale,1,naive,1,baked,yes,1024,1024,3,585.924,1757.77,1.717,52.4863,74.1048,56.8523,0.044,1.00,1,0
+phase8_unfused_gaussian,fusion,gaussian:1.4,1,naive,1,baked,yes,1024,1024,3,347.03,1041.09,1.017,90.3617,99.2376,44.2936,1.701,1.00,1,0
+phase8_unfused_sobel,fusion,sobel,1,naive,1,baked,yes,1024,1024,3,453.47,1360.41,1.329,67.5192,93.3379,74.7537,0.170,1.00,1,0
+phase8_unfused_threshold,fusion,threshold:0.3,1,naive,1,baked,yes,1024,1024,3,593.062,1779.18,1.737,52.3995,68.0586,48.0545,0.078,1.00,1,0
+phase8_fused_full,fusion,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,270.491,811.474,0.792,116.947,121.901,62.0003,2.516,1.00,1,0
+phase8_len1,chain_length,invert,1,naive,1,baked,yes,1024,1024,3,566.903,1700.71,1.661,52.715,85.2501,53.7987,0.053,1.00,1,0
+phase8_len2,chain_length,"grayscale,sobel",2,naive,1,baked,yes,1024,1024,3,454.792,1364.38,1.332,71.5575,92.308,62.6888,0.247,1.00,1,0
+phase8_len4,chain_length,"grayscale,gaussian:1.4,sobel,threshold:0.3",4,naive,1,baked,yes,1024,1024,3,269.873,809.619,0.791,117.447,122.636,60.418,2.518,1.00,1,0
+phase8_len6,chain_length,"grayscale,brightness:0.1,gaussian:1.4,invert,sobel,threshold:0.3",6,naive,1,baked,yes,1024,1024,3,231.285,693.856,0.678,136.727,143.185,50.4278,3.108,1.00,1,0
