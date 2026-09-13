@@ -90,3 +90,7 @@ add_test(NAME phase8_gpu_constants COMMAND imgjit-gpu-tests "[constants]")
 add_test(NAME phase8_gpu_faults COMMAND imgjit-gpu-tests "[faults]")
 add_test(NAME phase8_gpu_fault_backend COMMAND imgjit-gpu-tests "[fault-backend]")
 add_test(NAME phase8_gpu_fault_server COMMAND imgjit-gpu-tests "[fault-server]")
+# Two concurrent connections, neither of which triggers the fault, both of which are
+# affected by it — the blast-radius claim [fault-server] can only imply from one
+# connection at a time, observed here with real overlapping traffic.
+add_test(NAME phase8_gpu_fault_concurrent COMMAND imgjit-gpu-tests "[fault-concurrent]")

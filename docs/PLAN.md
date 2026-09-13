@@ -527,12 +527,13 @@ around the stages, excluding copies and compile, and is a clean per-frame number
       clear. This also qualifies Phase 7's ~3% tiled-Sobel regression further toward
       "not measurably faster" (already noted there after session 1; unchanged by session 2, which
       did not retest Sobel tiling).
-- [ ] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
+- [x] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
       context recreation holds under fault, and that the server survives
 
-      **Written and run on Colab (T4), and it falsified a premise the project had carried since
-      Phase 6** — see the correction under Phase 6 above. Recreation does *not* recover from an
-      illegal access, because the fault is process-wide: `cuCtxCreate` afterwards returns the
+      **Verified on Colab (T4): `phase8_gpu_faults`, `phase8_gpu_fault_backend`,
+      `phase8_gpu_fault_server` all pass.** And it falsified a premise the project had carried
+      since Phase 6 — see the correction under Phase 6 above. Recreation does *not* recover from
+      an illegal access, because the fault is process-wide: `cuCtxCreate` afterwards returns the
       same error. What holds instead is the fallback `CudaBackend::recover()` already
       implemented: every later frame is answered with status 6, the worker does not die, and
       the server keeps accepting connections. The cases were rewritten to assert that contract
@@ -544,7 +545,19 @@ around the stages, excluding copies and compile, and is a clean per-frame number
       cases down with it in `cuCtxCreate`. `phase8_gpu_faults` (malformed protocol against a
       GPU-backed server, asserting `context_recreations == 0`: a protocol error must never
       become a GPU event), `phase8_gpu_fault_backend`, `phase8_gpu_fault_server`.
-      **Next:** rerun all three on Colab now that they are split and assert the real contract.
+
+      **The concurrency gap is closed: `phase8_gpu_fault_concurrent`, written, not yet run on
+      Colab.** Two identical connections pipeline the heaviest stencil in the closed op set
+      (`gaussian:4`) concurrently; the fault is armed by the test harness once both have
+      already completed several frames — independent of anything either connection sent — and
+      lands on whichever connection's frame the single shared worker happens to process next.
+      Asserts both connections see failures afterward (the blast radius is global, not
+      isolated to whichever connection "caused" it — there is no such connection, and no
+      per-connection routing in `CudaBackend` for one to matter to), and that any frame that
+      *does* come back `kOk` — including one genuinely resident on the GPU at the instant of
+      injection — is never silently corrupted. That last check is the one the three sequential
+      cases structurally cannot perform, since none of them has a second frame in flight when
+      the fault lands.
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
 - **Done when:** every architectural claim in `ARCHITECTURE.md` maps to a number in the table
 

@@ -19,12 +19,30 @@
 // than requiring one branch. A future driver that genuinely recovers must not turn these
 // red.
 //
-// WHY THREE ctest CASES AND NOT ONE. The poisoning is process-wide, so the first case to
+// WHY FOUR ctest CASES AND NOT ONE. The poisoning is process-wide, so the first case to
 // inject a fault takes every later case in the same process down with it — the first run
 // of this file failed exactly that way, with the two innocent cases dying in
 // `cuCtxCreate`. Each injecting case therefore gets its own tag and its own ctest entry,
 // which is its own process. The malformed-protocol case injects nothing and is kept
 // separate for the same reason in reverse: it must not be poisoned by a neighbour.
+//
+// THE CONCURRENT CASE'S ONE JOB: show the blast radius is the whole PROCESS, not one
+// connection — with two real, unrelated, simultaneously-connected clients, not inferred
+// from reading CudaBackend. No client causes the fault; nothing a client sends can (see
+// below). It is injected by the test harness, off to the side, while two ordinary
+// connections are mid-traffic, and then BOTH are checked. If the fault only broke
+// whichever connection happened to be adjacent to it, that would be a per-connection
+// blast radius — a reasonable thing to assume from the outside, and wrong here, because
+// there is exactly one CudaBackend behind the whole server with no per-connection routing
+// at all. Every other case in this file is sequential (drains one frame before sending the
+// next), so none of them can even ask this question — there is never a second connection's
+// frame on the GPU at the instant the fault lands.
+//
+// A second, narrower thing falls out of running it this way, worth naming so it isn't
+// mistaken for the main point: with two connections' frames genuinely resident at once,
+// one of them can be correctly finished on the GPU but not yet retired when the fault
+// hits. This case also checks that such a frame is never returned as a corrupted "success"
+// — it is either a clean error or a genuinely correct answer, never silently wrong.
 //
 // WHY THIS IS NOT ALREADY COVERED. Phase 6's [recovery] cases call recreate_context()
 // directly and feed the backend a job with a null input — neither produces a sticky
@@ -49,6 +67,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -58,6 +77,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "backend/cuda/cuda_backend.h"
@@ -510,4 +530,183 @@ TEST_CASE("a driver fault leaves the server answering instead of dying", "[fault
   CHECK(last_injection != CUDA_SUCCESS);
   CHECK(server.backend_stats().context_recreations >= 1);
   CHECK(server.frames_failed() >= static_cast<std::uint64_t>(failed));
+}
+
+// ---------------------------------------------------------------------------------------
+// [fault-concurrent] — injects a process-wide fault. OWN ctest case, therefore own process.
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+// What one connection saw. Catch2's assertion macros are not thread-safe (the same rule
+// test_gpu_server.cpp follows), so each client thread only records what happened here and
+// every CHECK runs on the main thread after both threads join.
+struct ConcurrentClientResult {
+  std::uint32_t frames_ok{0};
+  std::uint32_t frames_failed{0};  // Status::kInternalError
+  int worst_difference{0};        // over frames that came back kOk
+  std::string error;              // desync, or a status this test did not expect
+};
+
+// Pipelines `total_frames` through one connection, `window` at a time, refilling as
+// responses arrive — the same shape run_stress_client in test_gpu_pipeline.cpp uses to
+// keep several frames genuinely resident on the GPU rather than one at a time. Two of
+// these run concurrently against ONE server below; neither is the "bad" one — the fault
+// is injected by the test harness independently of anything either connection sends,
+// which is what makes it fair to ask whether both are affected equally.
+void run_concurrent_client(std::uint16_t port, const Image& input, const Image& expected,
+                           const std::string& chain, int total_frames, int window,
+                           ConcurrentClientResult& result) {
+  try {
+    Client client("127.0.0.1", port);
+    int sent = 0;
+    int received = 0;
+
+    const int initial = std::min(window, total_frames);
+    for (int i = 0; i < initial; ++i) {
+      client.send(input, chain);
+      ++sent;
+    }
+
+    while (received < total_frames) {
+      const ClientResponse response = client.receive();
+      ++received;
+      if (!response.matched) {
+        result.error = "a response arrived for a seq_num that was never sent";
+        return;
+      }
+      if (response.status == Status::kOk) {
+        ++result.frames_ok;
+        result.worst_difference =
+            std::max(result.worst_difference, max_abs_difference(expected, response.image));
+      } else if (response.status == Status::kInternalError) {
+        ++result.frames_failed;
+      } else {
+        result.error = "unexpected status " + std::to_string(static_cast<int>(response.status));
+        return;
+      }
+      if (sent < total_frames) {
+        client.send(input, chain);
+        ++sent;
+      }
+    }
+  } catch (const std::exception& error) {
+    result.error = error.what();
+  }
+}
+
+}  // namespace
+
+TEST_CASE("a fault mid-stream degrades every concurrent client, not just one",
+          "[fault-concurrent]") {
+  // WHAT THIS PROVES: the blast radius of a driver fault is the whole server process,
+  // not whichever one connection happened to be near it. Two ordinary, identical
+  // connections run concurrently; NEITHER causes the fault — it is armed from this
+  // (test) thread, off to the side, and lands on whichever connection's frame the one
+  // shared worker happens to process next. The claim under test is that BOTH
+  // connections fail afterward regardless of which one that was, because there is one
+  // CudaBackend behind the whole server with no notion of "this connection" at all.
+  //
+  // The stencil is gaussian:4 (radius 12 — the same choice test_gpu_pipeline.cpp's
+  // [recovery] case makes), heavy enough that several frames stay genuinely resident on
+  // the GPU instead of finishing before the next submit. The fault is armed once both
+  // connections have already completed several frames each, proving the pipeline was
+  // genuinely running rather than merely started.
+  constexpr int kSize = 256;
+  const std::string chain = "gaussian:4";
+  const Image input = make_image(kSize, kSize, 3, 0xc0deU);
+  const Image expected = oracle(input, chain);
+
+  std::atomic<FaultInjectingBackend*> injector{nullptr};
+  Server server(fault_config(), [&injector] {
+    auto backend = std::make_unique<FaultInjectingBackend>();
+    injector.store(backend.get());
+    return std::unique_ptr<imgjit::IBackend>(std::move(backend));
+  });
+  server.start();
+  REQUIRE(injector.load() != nullptr);
+
+  // Window matches fault_config()'s 4 slots / 2 per connection, which in turn matches
+  // CudaBackend's default 4 streams: two connections at window 2 can keep all 4 stream
+  // slots genuinely occupied at once. The frame count is generous on purpose — arming is
+  // timed off a live counter (below), not a fixed delay, so there is no hard guarantee
+  // about how many round trips remain when it fires; a large total is what makes it
+  // overwhelmingly likely that real traffic is still flowing from both connections when
+  // it does; too small a total risks both connections draining before the main thread
+  // ever gets to arm the fault, which would make the "both connections fail" assertions
+  // below flaky rather than load-bearing.
+  constexpr int kFramesPerClient = 60;
+  constexpr int kWindow = 2;
+  ConcurrentClientResult resultA;
+  ConcurrentClientResult resultB;
+
+  std::thread threadA([&] {
+    run_concurrent_client(server.port(), input, expected, chain, kFramesPerClient, kWindow,
+                          resultA);
+  });
+  std::thread threadB([&] {
+    run_concurrent_client(server.port(), input, expected, chain, kFramesPerClient, kWindow,
+                          resultB);
+  });
+
+  // frames_completed() is a live atomic the worker updates as it retires each frame
+  // (src/net/server.cpp), unlike backend_stats(), which reads as zeroes until stop() —
+  // so polling it here is safe and meaningful while the server is still running. Waiting
+  // for several completions before arming is what makes "mid-stream" true rather than
+  // aspirational: both connections have already had genuinely successful traffic by the
+  // time the fault lands. Bounded, so a real bug hangs this case with a clear failure
+  // rather than the test suite itself.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (server.frames_completed() < 6) {
+    if (std::chrono::steady_clock::now() > deadline) {
+      FAIL("server never reached steady-state pipelining before the deadline");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  injector.load()->arm();
+
+  threadA.join();
+  threadB.join();
+
+  INFO("A: " << resultA.error);
+  INFO("B: " << resultB.error);
+  CHECK(resultA.error.empty());
+  CHECK(resultB.error.empty());
+  CHECK(resultA.frames_ok + resultA.frames_failed == static_cast<std::uint32_t>(kFramesPerClient));
+  CHECK(resultB.frames_ok + resultB.frames_failed == static_cast<std::uint32_t>(kFramesPerClient));
+
+  // THE ASSERTION THIS CASE EXISTS FOR. Neither connection sent anything malformed or did
+  // anything to provoke the fault — the harness injected it independently of both, on
+  // whichever submit() happened to run next. If the blast radius were isolated to one
+  // connection, at most one of these would ever see a failure. Both do, because
+  // CudaBackend is one shared instance behind the whole server with no per-connection
+  // routing: once its context is gone, submit() and poll_completions() behave identically
+  // for every job regardless of which socket it arrived on.
+  CHECK(resultA.frames_failed > 0);
+  CHECK(resultB.frames_failed > 0);
+
+  // And whichever frames DID come back kOk — including any that were genuinely in flight
+  // on the GPU at the instant of injection — are never silently wrong. A frame that
+  // finished correctly on the device but had not yet been retired is allowed to be
+  // thrown away as an error instead (retire_ready_streams's cuEventQuery on it also fails
+  // once the context is poisoned, since every driver call on a dead context returns the
+  // same sticky error — not just the one that caused it), but it must never come back as
+  // a successful, corrupted answer. This is the check the sequential cases in this file
+  // cannot perform at all, because none of them has a second frame genuinely resident
+  // when the fault lands.
+  CHECK(resultA.worst_difference <= 1);
+  CHECK(resultB.worst_difference <= 1);
+
+  // Read the decorator's own counters BEFORE stopping: the worker owns the backend and
+  // destroys it on the way out, so this pointer dangles once stop() returns.
+  const std::uint32_t injections = injector.load()->injections();
+  server.stop();
+
+  // Exactly one injection: the flag is consumed (armed_.exchange(false)) by the first
+  // submit() that sees it, so it cannot fire twice no matter how many connections race to
+  // be that submit().
+  CHECK(injections == 1);
+  CHECK(server.backend_stats().context_recreations >= 1);
+  CHECK(server.frames_failed() >=
+       static_cast<std::uint64_t>(resultA.frames_failed) + resultB.frames_failed);
 }
