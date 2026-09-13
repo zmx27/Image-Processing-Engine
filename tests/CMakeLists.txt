@@ -80,4 +80,13 @@ add_test(NAME phase8_gpu_constants COMMAND imgjit-gpu-tests "[constants]")
 # recreate_context(), and malformed protocol frames against a GPU-backed server rather
 # than the CPU one. "The server survives" is the claim under test, so a failure here
 # should never be confused with a pipeline bug.
+#
+# THREE CASES, THREE PROCESSES, AND THAT IS NOT OPTIONAL. An illegal access poisons the
+# whole PROCESS, not just the context that caused it — measured on a T4, cuCtxCreate
+# afterwards returns CUDA_ERROR_ILLEGAL_ADDRESS, so anything sharing the process with an
+# injecting case dies in the CudaBackend constructor. The first version of this file ran
+# all three under one tag and the two innocent cases failed exactly that way. ctest runs
+# each add_test as its own process, which is what keeps them isolated.
 add_test(NAME phase8_gpu_faults COMMAND imgjit-gpu-tests "[faults]")
+add_test(NAME phase8_gpu_fault_backend COMMAND imgjit-gpu-tests "[fault-backend]")
+add_test(NAME phase8_gpu_fault_server COMMAND imgjit-gpu-tests "[fault-server]")

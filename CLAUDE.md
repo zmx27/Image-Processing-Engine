@@ -30,10 +30,17 @@ Link `CUDA::cuda_driver` and `CUDA::nvrtc`. Never link `CUDA::cudart`.
 1. **CUcontext ownership**: only the GPU worker thread ever calls a CUDA Driver API function.
    `cuCtxCreate` runs on that thread and the context never migrates off it. No file
    outside `src/backend/cuda/` may `#include <cuda.h>` or `<nvrtc.h>`.
-   As of Phase 6 the context is no longer created *exactly once*: an illegal access poisons a
-   context permanently, so `CudaBackend::recreate_context()` destroys and rebuilds it. That is
+   As of Phase 6 the context is no longer created *exactly once*: a sticky driver error may
+   poison it, so `CudaBackend::recreate_context()` destroys and rebuilds it. That is
    still the same thread doing it, and it is the only relaxation — a context is never created
    off-worker, never made current on a second thread, and never held by two owners at once.
+   **Phase 8's error injection measured the limit of that recovery: an illegal access poisons
+   the whole PROCESS, not just the context.** On a T4, `cuCtxCreate` after one returns
+   `CUDA_ERROR_ILLEGAL_ADDRESS` too, so the rebuild fails and the backend then answers every
+   frame with status 6 for the life of the process — which `recover()` was already written to
+   do. Recreation is still the right response (it is the only way back from the errors that
+   *are* per-context, and it costs one failed rebuild when it is not), but "recreate and carry
+   on" is a best-effort path, not a guarantee. See `tests/test_gpu_faults.cpp`.
    Verify: `grep -rE '\b(cu[A-Z]|CU[a-z]|nvrtc)' src/ include/ | grep -v backend/cuda/`
    The alternation matters: `cu[A-Z]` alone catches calls but misses every CUDA *type*
    (`CUstream`, `CUevent`, `CUmodule`, `CUdeviceptr` are `CU[a-z]`) and all of NVRTC — and a

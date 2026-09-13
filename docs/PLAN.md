@@ -366,6 +366,15 @@ sticky — an illegal access poisons a context permanently and every later call 
 not compile, which never touched a context; recovering from one by tearing the GPU down would turn
 a single client's bad request into every other client's failed frame.
 
+> **Corrected by Phase 8's error injection.** The premise above is half wrong, and the half that
+> is wrong is the interesting one: an illegal access poisons the whole **process**, not the
+> context. `cuCtxCreate` after one returns `CUDA_ERROR_ILLEGAL_ADDRESS` too (measured on a T4),
+> so the rebuild fails and no in-process recovery is possible. What the design delivers is
+> therefore graceful degradation — status 6 for every later frame, server still up — which is
+> exactly the fallback `recover()` was written for. The recreation attempt stays: it is right
+> for per-context errors and costs one failed rebuild when the fault is process-wide. See
+> `tests/test_gpu_faults.cpp` and `CLAUDE.md` invariant 1.
+
 **The benchmark is two runs of one binary, not a comparison against a build that no longer
 exists.** `--streams 1` is the Phase 5 pipeline (one frame on the GPU at a time), so the A/B is
 like-for-like under the same harness — see `bench/README.md`.
@@ -521,11 +530,21 @@ around the stages, excluding copies and compile, and is a clean per-frame number
 - [ ] Error-injection pass: malformed protocol, forced illegal access → confirm the Phase 6
       context recreation holds under fault, and that the server survives
 
-      **Written (`tests/test_gpu_faults.cpp`, ctest case `phase8_gpu_faults`); awaiting the
-      Colab run.** Three cases: a real illegal access recovered from at the backend, malformed
-      frames answered without the GPU hearing about them, and a driver fault under a live
-      server. Locally: syntax-checked against stub driver headers with `-Wall -Wextra`, portable
-      suite green, invariant 1's grep silent.
+      **Written and run on Colab (T4), and it falsified a premise the project had carried since
+      Phase 6** — see the correction under Phase 6 above. Recreation does *not* recover from an
+      illegal access, because the fault is process-wide: `cuCtxCreate` afterwards returns the
+      same error. What holds instead is the fallback `CudaBackend::recover()` already
+      implemented: every later frame is answered with status 6, the worker does not die, and
+      the server keeps accepting connections. The cases were rewritten to assert that contract
+      (and to tolerate a driver that *does* recover, so they stay honest on other hardware)
+      rather than the recovery that does not happen.
+
+      Three ctest cases, **three processes, which is not optional**: an injected fault poisons
+      the whole process, so the first version — all three under one tag — took its two innocent
+      cases down with it in `cuCtxCreate`. `phase8_gpu_faults` (malformed protocol against a
+      GPU-backed server, asserting `context_recreations == 0`: a protocol error must never
+      become a GPU event), `phase8_gpu_fault_backend`, `phase8_gpu_fault_server`.
+      **Next:** rerun all three on Colab now that they are split and assert the real contract.
 - [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
 - **Done when:** every architectural claim in `ARCHITECTURE.md` maps to a number in the table
 

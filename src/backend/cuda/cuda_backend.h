@@ -32,13 +32,21 @@
 // buffer. There is no allocating path in submit() at all — a frame with no device
 // buffer to run in is an error, not a quiet cuMemAlloc.
 //
-// CONTEXT RECREATION (docs/PLAN.md Phase 6). An illegal access poisons a context
-// permanently: every later driver call returns the same sticky error, so there is no
-// recovery short of destroying it. recreate_context() does that as ONE operation —
-// in-flight jobs fail with an error completion, the stream slots and the kernel cache
-// and the context all go, and a fresh set comes back — because these structures'
-// lifetimes are genuinely coupled (every CUmodule belongs to the context) and bolting
-// recovery on after the fact would be surgery on the most delicate code in the project.
+// CONTEXT RECREATION (docs/PLAN.md Phase 6). A sticky driver error poisons the context:
+// every later driver call returns it, so there is no recovery short of destroying it.
+// recreate_context() does that as ONE operation — in-flight jobs fail with an error
+// completion, the stream slots and the kernel cache and the context all go, and a fresh
+// set comes back — because these structures' lifetimes are genuinely coupled (every
+// CUmodule belongs to the context) and bolting recovery on after the fact would be
+// surgery on the most delicate code in the project.
+//
+// IT IS BEST-EFFORT, AND FOR THE HEADLINE CASE IT DOES NOT SUCCEED. Phase 8's error
+// injection measured it: an illegal access poisons the whole *process*, so the
+// cuCtxCreate inside the rebuild returns the same error and recovery is impossible
+// without restarting. recover() already handles that — it swallows the failed rebuild,
+// leaves the context empty, and launch() then refuses every frame with an error
+// completion, which the server turns into status 6. The guarantee is a live server that
+// keeps answering, not work that resumes (tests/test_gpu_faults.cpp).
 //
 // This header lives in src/backend/cuda/ rather than include/, because it includes
 // <cuda.h> transitively and CLAUDE.md invariant 1 scans include/ precisely because

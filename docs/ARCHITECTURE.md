@@ -167,6 +167,17 @@ is a deadlock that only appears under pipelining, which is exactly the load the 
   status 6, which is the documented cost. The *frame slots* deliberately survive — they are
   process-owned pages pinned with `cuMemHostRegister` rather than `cuMemAllocHost` allocations,
   precisely so that recovery cannot free memory the connection threads are `recv()`ing into.
+
+  **Measured limit (Phase 8's error injection, `tests/test_gpu_faults.cpp`): for an illegal
+  access the recreation does not succeed.** The fault is process-wide, not per-context — on a
+  T4, `cuCtxCreate` after one returns `CUDA_ERROR_ILLEGAL_ADDRESS` as well, so the rebuild
+  throws and the backend falls into the path `recover()` was already written for: it answers
+  **every subsequent frame with status 6** rather than crashing, and the server stays up and
+  keeps accepting connections. Recovering the GPU within the process would require the process
+  to restart. So the guarantee this design actually provides is *graceful degradation and a
+  live server*, not *transparent recovery* — the recreation attempt is still correct (per-context
+  errors do exist, and a failed rebuild costs only that attempt), but it must not be described
+  as a promise that work resumes.
 - **NVRTC source must be self-contained, and there is no `kernels/` directory.** NVRTC has no
   default include path, so generated source cannot `#include <cstdint>` (and must not include
   `<cuda_runtime.h>` — that is invariant 8). The stable device helpers therefore live in
