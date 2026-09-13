@@ -167,8 +167,8 @@ int main(int argc, char** argv) {
 
     // The key the kernel cache is keyed by, printed here because the CLI is the only
     // place a human can see the canonicalizer's output. Note what it is NOT a function
-    // of: the image was already loaded, and its dimensions are not an input (CLAUDE.md
-    // invariant 4).
+    // of: the image was already loaded, and its dimensions are not an input
+    // (invariant 4).
     imgjit::KernelKey key;
     key.chain = *chain;
     key.channels = input.channels();

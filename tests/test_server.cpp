@@ -367,7 +367,7 @@ TEST_CASE("a pipelining client does not deadlock", "[server]") {
 TEST_CASE("backpressure blocks the reader rather than dropping frames", "[server]") {
   // One slot, one per connection, a worker that takes 20 ms a frame: the reader is
   // guaranteed to park on slot claim. What must NOT happen is a dropped frame — an
-  // unconfigured build never drops (CLAUDE.md invariant 5).
+  // unconfigured build never drops (invariant 5).
   const Image input = fixture("solid_4x4_rgb.png");
   ServerConfig config = test_config();
   config.num_slots = 1;

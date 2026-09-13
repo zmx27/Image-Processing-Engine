@@ -13,7 +13,7 @@
 //   * one CUcontext and one kernel cache serve every connection, so chains from
 //     different clients interleave through a single compile-and-launch path;
 //   * a channel count that differs per connection is a different kernel identity
-//     (CLAUDE.md invariant 4), so a shared-cache mistake shows up as one client getting
+//     (invariant 4), so a shared-cache mistake shows up as one client getting
 //     another client's kernel — wrong pixels, not a crash.
 //
 // Catch2 assertion macros are not thread-safe, so every client thread records what it

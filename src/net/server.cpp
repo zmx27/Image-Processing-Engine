@@ -32,7 +32,7 @@ namespace {
 
 // What the writer thread needs in order to answer one request. It carries the pixels by
 // value: the slot the input arrived in is released the moment the job completes, so
-// nothing downstream of the worker may point into it (CLAUDE.md invariant 10).
+// nothing downstream of the worker may point into it (invariant 10).
 struct Response {
   std::uint32_t seq_num{0};
   Status status{Status::kOk};
@@ -193,7 +193,7 @@ struct Server::Impl {
   std::atomic<bool> running{false};
 
   // Touched only by the worker thread, from its first line to its last. That is not a
-  // convention here, it is CLAUDE.md invariant 1 for the CUDA build.
+  // convention here, it is invariant 1 for the CUDA build.
   std::unique_ptr<IBackend> backend;
 
   // Published by the worker before it signals ready, read by every reader thread
@@ -211,7 +211,7 @@ struct Server::Impl {
 
   // Snapshotted by the worker just before it destroys the backend, and read by callers
   // only after stop() has joined it. The backend is worker-owned for its whole life
-  // (CLAUDE.md invariant 1), so this hand-off is what lets Phase 6's counters be
+  // (invariant 1), so this hand-off is what lets Phase 6's counters be
   // reported without a second thread ever touching the object that produced them.
   BackendStats final_backend_stats;
 };
@@ -307,7 +307,7 @@ void Server::Impl::worker_main(std::promise<void> ready) {
     if (backend == nullptr) {
       throw std::runtime_error("Server: the backend factory returned nothing");
     }
-    // Allocated once, on this thread, and never again (CLAUDE.md invariant 2). The pool
+    // Allocated once, on this thread, and never again (invariant 2). The pool
     // borrows this storage; the backend owns it for its whole lifetime.
     std::byte* base = backend->allocate_slots(config.num_slots, config.max_payload_bytes);
     slots.emplace(base, config.num_slots, config.max_payload_bytes, config.slots_per_connection);
@@ -525,8 +525,8 @@ void Server::Impl::reader_loop(const std::shared_ptr<Connection>& connection) {
       response.status = status;
       connection->outbox.push(std::move(response));
 
-      // A protocol error produces an error response; it never aborts the server
-      // (CLAUDE.md conventions). Whether it ends the CONNECTION depends on whether the
+      // A protocol error produces an error response; it never aborts the server.
+      // Whether it ends the CONNECTION depends on whether the
       // rest of the frame can be safely skipped.
       if (disposition_for(status) == Disposition::kClose) {
         return;
@@ -539,7 +539,7 @@ void Server::Impl::reader_loop(const std::shared_ptr<Connection>& connection) {
 
     // Blocks when the pool is empty or this connection is at its cap. That block is the
     // backpressure: it stops this thread recv()ing, which fills the client's send
-    // buffer through TCP flow control (CLAUDE.md invariant 5). Nothing is ever dropped.
+    // buffer through TCP flow control (invariant 5). Nothing is ever dropped.
     const std::optional<std::size_t> slot = slots->claim(connection->id);
     if (!slot.has_value()) {
       return;  // the pool was closed: the server is shutting down

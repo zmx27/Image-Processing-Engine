@@ -40,7 +40,7 @@ endif()
 
 # No Mac has an NVIDIA GPU (Intel or Apple Silicon) — CUDA is only ever found on
 # Colab/Linux. This must stay optional so the portable core builds on macOS with
-# no CUDA toolkit present at all. See CLAUDE.md and docs/ARCHITECTURE.md.
+# no CUDA toolkit present at all. See docs/ARCHITECTURE.md.
 find_package(CUDAToolkit QUIET)
 if(CUDAToolkit_FOUND)
   set(IMGJIT_ENABLE_CUDA ON)

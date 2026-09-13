@@ -1,6 +1,6 @@
 #pragma once
 
-// The scalar CPU implementation of the closed op set — CLAUDE.md invariant 9: this is
+// The scalar CPU implementation of the closed op set — invariant 9: this is
 // the correctness oracle every GPU path is diffed against. Clarity beats speed here
 // without exception; nothing in this file should ever be optimized.
 //

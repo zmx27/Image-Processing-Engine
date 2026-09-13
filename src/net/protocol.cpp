@@ -6,8 +6,8 @@ namespace imgjit::net {
 namespace {
 
 // Field-by-field little-endian packing. Written out rather than reinterpret_cast so the
-// result does not depend on the host's byte order or on struct padding (CLAUDE.md
-// invariant 6). Every environment this targets is little-endian, so these are no-ops on
+// result does not depend on the host's byte order or on struct padding (invariant 6).
+// Every environment this targets is little-endian, so these are no-ops on
 // the hardware — the point is that they are no-ops by specification, not by accident.
 void put_u8(std::byte* out, std::uint8_t value) {
   out[0] = static_cast<std::byte>(value);

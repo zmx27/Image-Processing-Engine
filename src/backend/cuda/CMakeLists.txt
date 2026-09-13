@@ -1,5 +1,5 @@
-# This is the only directory permitted to include <cuda.h> / <nvrtc.h> (CLAUDE.md
-# invariant 1), so the include directory is src/ and consumers spell the path in full.
+# This is the only directory permitted to include <cuda.h> / <nvrtc.h> (invariant 1),
+# so the include directory is src/ and consumers spell the path in full.
 #
 # It builds as TWO targets, because not everything here needs a GPU:
 #
@@ -23,7 +23,7 @@ if(NOT IMGJIT_ENABLE_CUDA)
 endif()
 
 # CUDA::cudart is never linked — the Runtime API would create an implicit primary
-# context that conflicts with the one the worker owns (CLAUDE.md invariant 8).
+# context that conflicts with the one the worker owns (invariant 8).
 add_library(imgjit_cuda STATIC
   cuda_backend.cpp
   kernel_cache.cpp)

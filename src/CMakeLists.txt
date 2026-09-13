@@ -1,5 +1,5 @@
 # Portable subdirectories build everywhere, including macOS with no CUDA toolkit
-# present. See CLAUDE.md.
+# present.
 add_subdirectory(core)
 add_subdirectory(util)
 add_subdirectory(net)

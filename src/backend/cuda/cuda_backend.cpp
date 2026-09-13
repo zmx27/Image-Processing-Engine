@@ -160,7 +160,7 @@ void CudaBackend::launch(const FrameJob& job, const JobHandle handle) {
 
   const cuda::CompiledChain& compiled = cache_.get(key_for(job.chain, job.channels));
 
-  // CLAUDE.md invariant 2, enforced rather than merely intended: there is no per-frame
+  // Invariant 2, enforced rather than merely intended: there is no per-frame
   // allocation path here at all, so the only way to get a device buffer is to have
   // asked for one at startup. Phase 3's exemption — a file-in/file-out CLI may allocate
   // per invocation, having no pipeline to serialize — closed in Phase 5 and has stayed
@@ -315,7 +315,7 @@ void CudaBackend::retire_ready_streams() {
     kernel_ms_sum_ += static_cast<double>(kernel_ms);
     ++kernel_samples_;
 
-    // CLAUDE.md invariant 3, and this is the only place in the project that decides a
+    // Invariant 3, and this is the only place in the project that decides a
     // frame is finished. Past this point — and not one line before it — the device
     // pair, the staging buffer and (through the completion the server is about to
     // route) the pinned input slot are all free to be handed to another frame.

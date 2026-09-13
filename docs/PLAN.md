@@ -23,7 +23,7 @@ run locally; phases marked `env: Mac` are pure local development with no GPU dep
 - [x] `CMakeLists.txt` with CUDA auto-detection → `IMGJIT_ENABLE_CUDA`; C++20; warnings-as-errors
 - [x] Vendor stb_image.h / stb_image_write.h + Catch2 under `third_party/`
 - [x] Add test image fixtures under `tests/testdata/`
-- [x] Write `CLAUDE.md`, `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/PROTOCOL.md`
+- [x] Write `docs/PLAN.md`, `docs/ARCHITECTURE.md`, `docs/PROTOCOL.md`
 - [x] `colab/run.ipynb` skeleton that clones the repo and builds (with a `!git pull` cell at the
       top and an `nvidia-smi` / CUDA version print cell for drift visibility)
 - **Done when:** clean CPU-only build on Mac, and the notebook produces a CUDA build on Colab
@@ -181,7 +181,7 @@ number, not a crash: the **tile size** from Phase 7 (baked into `__shared__` arr
 a naive|tiled boolean is not sufficient) and the **baked|parameterized constants mode** from
 Phase 8's A/B axis. Both are already reserved in the key as of Phase 2.
 
-**The authoritative field list** (`CLAUDE.md` invariant 4 points here; one copy, deliberately —
+**The authoritative field list** (invariant 4 points here; one copy, deliberately —
 `include/imgjit/core/kernel_key.h` implements exactly this and nothing else):
 
 | Field | Since | Why it is a codegen input |
@@ -195,7 +195,7 @@ Phase 8's A/B axis. Both are already reserved in the key as of Phase 2.
 **Not in the key, and never to be added: width and height.** They are launch arguments. This is
 enforced structurally — the struct has no such field and the hash takes nothing but the struct.
 
-**Invariant-2 exemption, scoped to this phase — and since closed.** `CLAUDE.md` invariant 2 forbids
+**Invariant-2 exemption, scoped to this phase — and since closed.** Invariant 2 forbids
 `cuMemAlloc` in the per-frame path. Phase 3 is a one-image-at-a-time CLI with no pipeline to
 serialize, so allocating intermediate device buffers per invocation was acceptable *here only*.
 Phase 5 closed it: `allocate_slots()` now allocates the device ping-pong pair alongside the pinned
@@ -252,7 +252,7 @@ reason `seq_num` is in the protocol. Building the FIFO assumption in means rewri
 and the integration test during the async phase. Verify the *set* of responses and match each by
 `seq_num`, never by arrival order.
 
-**The response path is decided here, and it is `CLAUDE.md` invariant 10.** The worker never
+**The response path is decided here, and it is invariant 10.** The worker never
 writes to a socket, and a slot is released the moment its work completes — never after its
 response has been written. Concretely: reader thread does framing and slot claim; worker
 processes and, on completion, copies the result out of the slot, releases the slot, and pushes
@@ -336,7 +336,7 @@ copy/compute overlap and for a compute-bound chain that ceiling is ~the copy fra
 - [x] **Context recreation** — teardown/rebuild as a unit: flush the kernel cache and device pool,
       fail every in-flight job with status 6, resume accepting work
 - [x] Stress test: sustained repeated runs with output checksums, specifically targeting
-      premature slot reuse (`CLAUDE.md` invariant 3)
+      premature slot reuse (invariant 3)
 - [x] Measurably faster than the serial pipeline: `--streams 4` vs `--streams 1` (same binary,
       same harness — the `--streams 1` row *is* the Phase 5 baseline re-measured) is +18%
       throughput and −36% p99 on the showcase chain. Zero checksum drift under stress.
@@ -358,7 +358,7 @@ individual slots at the instant a recreation happens, so driver-owned slot memor
 recovery into a use-after-free across live connections — silent corruption, in the one code path
 whose whole job is to survive a fault. The pages are ours and `cuMemHostRegister` pins them, so
 recreation detaches and reattaches at an address that never moves and nothing outside
-`src/backend/cuda/` learns that anything happened. See `CLAUDE.md` invariant 2.
+`src/backend/cuda/` learns that anything happened. See invariant 2.
 
 **Two error classes, because only one of them is the context's fault.** A driver error may be
 sticky — an illegal access poisons a context permanently and every later call returns it — so
@@ -373,7 +373,7 @@ a single client's bad request into every other client's failed frame.
 > therefore graceful degradation — status 6 for every later frame, server still up — which is
 > exactly the fallback `recover()` was written for. The recreation attempt stays: it is right
 > for per-context errors and costs one failed rebuild when the fault is process-wide. See
-> `tests/test_gpu_faults.cpp` and `CLAUDE.md` invariant 1.
+> `tests/test_gpu_faults.cpp` and invariant 1.
 
 **The benchmark is two runs of one binary, not a comparison against a build that no longer
 exists.** `--streams 1` is the Phase 5 pipeline (one frame on the GPU at a time), so the A/B is
@@ -558,7 +558,7 @@ around the stages, excluding copies and compile, and is a clean per-frame number
       injection — is never silently corrupted. That last check is the one the three sequential
       cases structurally cannot perform, since none of them has a second frame in flight when
       the fault lands.
-- [ ] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
+- [x] README results table; finalize `ARCHITECTURE.md` and `PROTOCOL.md` against actual behavior
 - **Done when:** every architectural claim in `ARCHITECTURE.md` maps to a number in the table
 
 **Parameterized means the gaussian's radius and weights, `brightness` and `threshold` become

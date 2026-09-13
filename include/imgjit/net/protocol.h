@@ -4,7 +4,7 @@
 // allocation, no I/O — which is what makes every malformed-input case a unit test
 // rather than something you can only provoke over a socket.
 //
-// Two properties this file exists to enforce (CLAUDE.md invariant 6):
+// Two properties this file exists to enforce (invariant 6):
 //
 //   * Fields are packed ONE AT A TIME, little-endian. Never memcpy a struct onto a
 //     socket: `RequestHeader` below is 25 bytes on the wire and larger in memory,

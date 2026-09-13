@@ -50,7 +50,7 @@ to make choosable: `--constants parameterized` for a per-request slider, the def
 
 **Do not bake width/height.** They are launch-time kernel arguments. Baking them would make every
 new resolution a cache miss and a fresh ~100 ms compile, growing the cache unboundedly and
-defeating the memoization pillar. See `CLAUDE.md` invariant 4.
+defeating the memoization pillar. See invariant 4.
 
 ## Component map
 
@@ -88,7 +88,7 @@ identical in both builds and the entire network path is testable on a Mac with n
 
 **1. One thread owns the CUcontext, forever.** The GPU worker calls `cuCtxCreate` once at startup
 and never releases or migrates it. No other thread makes any CUDA call. This sidesteps the whole
-class of push/pop lifetime bugs and is auditable by grep (see `CLAUDE.md` invariant 1).
+class of push/pop lifetime bugs and is auditable by grep (see invariant 1).
 
 **2. Pinned memory is a fixed pool allocated at startup, never per frame.** `cuMemAllocHost`
 requires a current context (so only the worker can allocate) and implicitly synchronizes (so
@@ -216,7 +216,6 @@ Built incrementally as phases need it, not scaffolded all at once.
 
 ```
 image-processing/
-├── CLAUDE.md                 # build commands, conventions, architectural invariants
 ├── CMakeLists.txt            # auto-detects CUDA → IMGJIT_ENABLE_CUDA
 ├── README.md                 # what it is, results table, how to run
 ├── colab/run.ipynb           # clones repo, installs deps, builds, runs tests + benchmarks

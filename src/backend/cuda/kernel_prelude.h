@@ -5,7 +5,7 @@
 //
 // There is deliberately no `kernels/` directory. NVRTC has no default include path,
 // so generated source cannot #include anything at all (and must not reach for
-// <cuda_runtime.h> — that is CLAUDE.md invariant 8). Keeping these ~40 lines here
+// <cuda_runtime.h> — that is invariant 8). Keeping these ~40 lines here
 // rather than in .cu files on disk avoids a runtime path dependency or a CMake embed
 // step, and avoids leaving behind fragments no compiler ever checks. The readability
 // need is served from the other end, by `imgjit-cli --dump-source`: what you read when

@@ -82,8 +82,8 @@ add_test(
 # Phase 1a: PTX produced ahead of time by nvcc, so the driver path can be proven
 # with JIT out of the picture. Deliberately an add_custom_command rather than
 # enable_language(CUDA): NVRTC compiles at runtime, so the project needs no CUDA
-# toolchain, and enabling one invites <<<>>> and cudart linkage (CLAUDE.md
-# invariant 8, docs/PLAN.md Phase 1). Generated rather than checked in so the blob
+# toolchain, and enabling one invites <<<>>> and cudart linkage (invariant 8,
+# docs/PLAN.md Phase 1). Generated rather than checked in so the blob
 # cannot go stale against invert_aot.cu.
 set(imgjit_aot_ptx "${CMAKE_CURRENT_BINARY_DIR}/invert_aot.ptx")
 add_custom_command(

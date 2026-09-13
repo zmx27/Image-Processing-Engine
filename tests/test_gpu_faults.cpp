@@ -7,8 +7,8 @@
 // kernel stores through a null pointer, `cuCtxCreate` itself returns
 // CUDA_ERROR_ILLEGAL_ADDRESS. The fault is not per-context but per-process, and no
 // sequence of driver calls gets the GPU back — the process has to be restarted. This
-// matches NVIDIA's own account of sticky errors and is now recorded in `CLAUDE.md`
-// invariant 1, `docs/ARCHITECTURE.md` and `docs/PLAN.md` Phases 6 and 8.
+// matches NVIDIA's own account of sticky errors and is now recorded in invariant 1,
+// `docs/ARCHITECTURE.md` and `docs/PLAN.md` Phases 6 and 8.
 //
 // So what is actually under test here is not "recovery works". It is the contract
 // `CudaBackend::recover()` already documents for the case where the rebuild fails: the

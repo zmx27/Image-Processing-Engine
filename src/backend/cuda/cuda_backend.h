@@ -16,7 +16,7 @@
 //
 // A STREAM SLOT IS THE UNIT OF EVERYTHING PER-FRAME. Each holds a stream, an event, the
 // device ping-pong pair the stages read and write, and a pinned staging buffer for the
-// result. That is what makes CLAUDE.md invariant 3 structural rather than remembered:
+// result. That is what makes invariant 3 structural rather than remembered:
 // there is no way to hand a frame a device buffer except by claiming a slot, and a slot
 // is returned to the free list ONLY after cuEventQuery confirms its event complete.
 // Reuse-before-completion is not a mistake that can be made one line at a time here.
@@ -27,8 +27,8 @@
 // the pipeline this phase exists to build. The D2H lands in pinned memory and the
 // worker copies out of it when the frame retires.
 //
-// ALLOCATION HAPPENS ONCE, IN allocate_slots(), AND NEVER PER FRAME (CLAUDE.md
-// invariant 2): the host frame slots, plus every stream slot's device pair and staging
+// ALLOCATION HAPPENS ONCE, IN allocate_slots(), AND NEVER PER FRAME (invariant 2):
+// the host frame slots, plus every stream slot's device pair and staging
 // buffer. There is no allocating path in submit() at all — a frame with no device
 // buffer to run in is an error, not a quiet cuMemAlloc.
 //
@@ -49,7 +49,7 @@
 // keeps answering, not work that resumes (tests/test_gpu_faults.cpp).
 //
 // This header lives in src/backend/cuda/ rather than include/, because it includes
-// <cuda.h> transitively and CLAUDE.md invariant 1 scans include/ precisely because
+// <cuda.h> transitively and invariant 1 scans include/ precisely because
 // public headers leak the furthest. Tools reach for it under IMGJIT_ENABLE_CUDA, which
 // is how tools/imgjit-spike.cpp already works.
 //

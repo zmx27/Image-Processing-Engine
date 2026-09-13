@@ -3,8 +3,7 @@
 // driver plumbing with JIT out of the picture.
 //
 // This file is never compiled by the project's C++ toolchain and CMake's CUDA
-// language is deliberately not enabled — see docs/PLAN.md Phase 1 and CLAUDE.md
-// invariant 8.
+// language is deliberately not enabled — see docs/PLAN.md Phase 1 and invariant 8.
 //
 // Phase 1b compiles a byte-for-byte equivalent kernel through NVRTC instead; the
 // twin lives in kInvertSource in imgjit-spike.cpp. Keep the two in sync.

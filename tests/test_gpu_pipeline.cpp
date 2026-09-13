@@ -5,7 +5,7 @@
 //               are genuinely resident at once, and every handle comes back exactly
 //               once with its own chain's answer.
 //   [stress]    sustained traffic through the real server, with output checksums, aimed
-//               squarely at premature slot reuse (CLAUDE.md invariant 3).
+//               squarely at premature slot reuse (invariant 3).
 //   [recovery]  context recreation as a unit: in-flight jobs die with status 6, the
 //               kernel cache is flushed, the frame slots survive, work resumes.
 //
@@ -124,7 +124,7 @@ std::vector<imgjit::Completion> drain(CudaBackend& backend, std::size_t expected
 }
 
 // A backend with its frame slots already allocated, which is the only state in which
-// submit() will run anything (CLAUDE.md invariant 2 — there is no allocating path).
+// submit() will run anything (invariant 2 — there is no allocating path).
 class Pipeline {
  public:
   Pipeline(std::size_t streams, std::size_t slot_count, std::size_t slot_bytes)
@@ -304,7 +304,7 @@ TEST_CASE("more frames than streams stall rather than overrun", "[async]") {
   // Past K in flight there is nowhere to put a frame, so submit() waits for a stream to
   // retire. That wait is the backend's own backpressure and it is counted, because a
   // pipeline that silently ran a frame in a buffer another frame was still using would
-  // look exactly like one that waited (CLAUDE.md invariant 3).
+  // look exactly like one that waited (invariant 3).
   constexpr std::size_t kStreams = 2;
   constexpr std::size_t kFrames = 12;
   constexpr int kSize = 96;

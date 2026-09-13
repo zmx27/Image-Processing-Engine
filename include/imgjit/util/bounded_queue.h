@@ -5,7 +5,7 @@
 // stretch item and would be a premature optimization against an untested design.
 //
 // BOUNDED is the operative word. The capacity is the second half of the backpressure
-// story — the first being slot-pool exhaustion (CLAUDE.md invariant 5): when the worker
+// story — the first being slot-pool exhaustion (invariant 5): when the worker
 // falls behind, `push` blocks the reader thread, the reader stops recv()ing, and the
 // client's send buffer fills through TCP flow control. An unbounded queue would convert
 // that into unbounded memory growth and call it throughput.

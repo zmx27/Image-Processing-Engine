@@ -117,8 +117,8 @@ TEST_CASE("slots are contiguous and independent", "[cpu]") {
 }
 
 TEST_CASE("slots are allocated once, at startup", "[cpu]") {
-  // A second call would mean a per-frame allocation path exists, which is CLAUDE.md
-  // invariant 2 in the CUDA build — and there it would also implicitly synchronize.
+  // A second call would mean a per-frame allocation path exists, which is invariant 2
+  // in the CUDA build — and there it would also implicitly synchronize.
   CpuBackend backend;
   backend.allocate_slots(2, 32);
   CHECK_THROWS(backend.allocate_slots(2, 32));

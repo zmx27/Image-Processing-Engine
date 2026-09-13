@@ -1,4 +1,4 @@
-// KernelKey hashing (docs/PLAN.md Phase 2, CLAUDE.md invariant 4).
+// KernelKey hashing (docs/PLAN.md Phase 2, invariant 4).
 
 #include <string_view>
 #include <unordered_set>

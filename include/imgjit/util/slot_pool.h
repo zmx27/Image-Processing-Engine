@@ -7,12 +7,12 @@
 // reason it is written this way in Phase 4 rather than the obvious way (docs/PLAN.md
 // Phase 4). The obvious pool new[]s its own buffer in its constructor; Phase 5 then has
 // to rewrite it, because pinned host memory must be allocated by
-// IBackend::allocate_slots() ON THE WORKER THREAD (CLAUDE.md invariants 1 and 2). By
+// IBackend::allocate_slots() ON THE WORKER THREAD (invariants 1 and 2). By
 // taking a base pointer it does not own, this class is identical in both phases: the
 // CPU backend hands it heap memory, the CUDA backend hands it pinned memory, and not a
 // line of pool logic changes.
 //
-// Blocking claim IS the backpressure mechanism (CLAUDE.md invariant 5). A reader that
+// Blocking claim IS the backpressure mechanism (invariant 5). A reader that
 // cannot get a slot stops recv()ing, which backs up through TCP flow control to the
 // client. Frames are never dropped and the pool never grows at runtime.
 //

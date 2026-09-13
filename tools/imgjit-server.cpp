@@ -11,7 +11,7 @@
 // Both halves of that sentence are load-bearing, and they are why the prewarm below
 // lives inside the factory rather than anywhere else: the factory body runs on the
 // worker thread, before Server::start() returns, which is the one place a compile can
-// happen that satisfies CLAUDE.md invariant 1 and still blocks startup until it is
+// happen that satisfies invariant 1 and still blocks startup until it is
 // done. A chain warmed there is a cache hit for the first client that asks for it,
 // instead of a ~50-200 ms NVRTC stall on a live frame (docs/ARCHITECTURE.md).
 
@@ -75,7 +75,7 @@ struct PrewarmEntry {
 };
 
 // "grayscale,sobel" or "grayscale,sobel@4". The channel count is part of the kernel
-// identity (CLAUDE.md invariant 4 — it is baked as a literal), so warming a chain warms
+// identity (invariant 4 — it is baked as a literal), so warming a chain warms
 // it for ONE channel count and the suffix is how the other two are asked for.
 bool parse_prewarm(const std::string& argument, PrewarmEntry& entry) {
   std::string chain_text = argument;

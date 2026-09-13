@@ -1,4 +1,4 @@
-// The scalar CPU ops (docs/PLAN.md Phase 2) — CLAUDE.md invariant 9's oracle, which
+// The scalar CPU ops (docs/PLAN.md Phase 2) — invariant 9's oracle, which
 // means these tests are what the GPU's correctness ultimately rests on.
 //
 // Assertions here are analytic or property-based, never golden output files

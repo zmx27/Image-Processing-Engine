@@ -4,7 +4,7 @@
 // RAII descriptor, listen/accept/connect, and the two loops that make TCP's byte-stream
 // nature survivable.
 //
-// `read_exact` is CLAUDE.md invariant 7: a bare recv() is a bug, not a shortcut. TCP
+// `read_exact` is invariant 7: a bare recv() is a bug, not a shortcut. TCP
 // makes no promise that a 25-byte header arrives in one segment, and the failure mode
 // of assuming it does is a header that decodes from a payload's bytes — silent
 // corruption, not an error. Every read in this project goes through here.

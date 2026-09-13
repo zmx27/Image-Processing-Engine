@@ -9,7 +9,7 @@
 //
 // Not thread-safe, deliberately: IBackend is a worker-thread-only interface (see
 // backend.h), so a lock here would be protecting against a call that would already be
-// violating CLAUDE.md invariant 1 in the CUDA build.
+// violating invariant 1 in the CUDA build.
 //
 // Portable: no CUDA, builds on macOS with no toolkit present.
 

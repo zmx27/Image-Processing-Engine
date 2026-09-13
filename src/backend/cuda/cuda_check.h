@@ -1,11 +1,11 @@
 #pragma once
 
 // Error-checking wrappers for the CUDA Driver API and NVRTC. Every driver/NVRTC
-// call in this project goes through CU_CHECK / NVRTC_CHECK (see CLAUDE.md
-// conventions); there are no unchecked calls.
+// call in this project goes through CU_CHECK / NVRTC_CHECK; there are no unchecked
+// calls.
 //
 // This directory is the only place permitted to include <cuda.h> / <nvrtc.h>
-// (CLAUDE.md invariant 1).
+// (invariant 1).
 
 #include <cuda.h>
 #include <nvrtc.h>

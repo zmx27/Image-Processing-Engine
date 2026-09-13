@@ -2,7 +2,7 @@
 
 // RAII wrappers for the driver resources: CUcontext, CUmodule, CUdeviceptr, pinned
 // host memory, CUstream and CUevent. No raw cuCtxDestroy / cuModuleUnload / cuMemFree /
-// cuStreamDestroy / cuEventDestroy appears in logic code (CLAUDE.md conventions).
+// cuStreamDestroy / cuEventDestroy appears in logic code.
 
 #include <cuda.h>
 
@@ -17,7 +17,7 @@
 
 namespace imgjit::cuda {
 
-// CLAUDE.md invariant 1: exactly one thread ever constructs this, and only that thread
+// Invariant 1: exactly one thread ever constructs this, and only that thread
 // destroys it. Non-movable so it cannot drift off that thread. Phase 6 is what made
 // "once, at startup" too strong a claim to keep: an illegal access poisons a context
 // permanently, so recovery is destroying this and building another one — still on the
@@ -129,8 +129,8 @@ class DeviceBuffer {
   std::size_t size_{};
 };
 
-// Page-locked host memory the DRIVER owns, allocated once at worker startup (CLAUDE.md
-// invariant 2 — the allocation implicitly synchronizes, so it must never happen per
+// Page-locked host memory the DRIVER owns, allocated once at worker startup
+// (invariant 2 — the allocation implicitly synchronizes, so it must never happen per
 // frame). Phase 6 uses it for the per-stream device-to-host staging buffers, which live
 // and die entirely inside the backend.
 //
@@ -297,7 +297,7 @@ class CudaStream {
   CUstream stream_{};
 };
 
-// The instrument behind CLAUDE.md invariant 3, and the most important type Phase 6
+// The instrument behind invariant 3, and the most important type Phase 6
 // added. Recorded on a stream after that frame's last transfer, it is the ONLY thing
 // permitted to say a frame is finished: not the return of cuLaunchKernel, not the
 // return of the async copy, both of which come back while the work is still queued.

@@ -2,7 +2,7 @@
 // GPU. Two independent claims, registered as two ctest cases so a failure names which:
 //
 //   [oracle]  every chain in the corpus matches the scalar CPU backend, which is
-//             CLAUDE.md invariant 9's whole purpose.
+//             invariant 9's whole purpose.
 //   [cache]   a repeated chain compiles exactly once, and the same chain at three
 //             resolutions still compiles once.
 //
@@ -73,7 +73,7 @@ int max_abs_difference(const Image& lhs, const Image& rhs) {
 }
 
 // One backend, one context, one slot allocation — matching how the server will use it,
-// and how CLAUDE.md invariant 2 says slots are allocated: once, at startup.
+// and how invariant 2 says slots are allocated: once, at startup.
 class Gpu {
  public:
   explicit Gpu(std::size_t max_slot_bytes, TileVariant tile = TileVariant::kNaive,
@@ -210,7 +210,7 @@ TEST_CASE("a repeated chain compiles exactly once", "[cache]") {
 }
 
 TEST_CASE("resolution is not part of the kernel identity", "[cache]") {
-  // CLAUDE.md invariant 4, as a runtime assertion rather than a structural one. If
+  // Invariant 4, as a runtime assertion rather than a structural one. If
   // width or height ever became a codegen input, this is where it would show: three
   // compiles instead of one, and a cache that grows with every frame size a client
   // happens to send.
@@ -268,7 +268,7 @@ TEST_CASE("a prewarmed chain costs its first frame no compile", "[cache]") {
   gpu.run(make_image(64, 64, 3), chain);
   CHECK(gpu.compiles() == 1);
 
-  // And the converse, which is CLAUDE.md invariant 4 again: `channels` is baked as a
+  // And the converse, which is invariant 4 again: `channels` is baked as a
   // literal, so warming a chain warms it for ONE channel count. A 4-channel frame of
   // the same chain is a different kernel and must still compile.
   gpu.run(make_image(64, 64, 4), chain);
@@ -387,7 +387,7 @@ TEST_CASE("tiled output matches the naive kernel's", "[tiling]") {
 }
 
 TEST_CASE("the tile configuration is part of the kernel identity", "[tiling]") {
-  // CLAUDE.md invariant 4, asserted at the cache by key rather than through a backend
+  // Invariant 4, asserted at the cache by key rather than through a backend
   // (a backend has one tile configuration for life). Naive, tile 16 and tile 32 are
   // three kernels — the tile edge is baked into the __shared__ array, so a naive|tiled
   // flag alone would have collided the last two — and asking for one again compiles

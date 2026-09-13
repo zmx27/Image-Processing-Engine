@@ -158,7 +158,7 @@ TEST_CASE("a pointwise run fuses into the neighbouring stencil, not its own kern
 }
 
 TEST_CASE("dimensions are launch arguments and never reach the source", "[codegen]") {
-  // CLAUDE.md invariant 4, checked from the codegen end. KernelKey has no dimension
+  // Invariant 4, checked from the codegen end. KernelKey has no dimension
   // field to leak, so this asserts the other half: the kernel takes them as
   // parameters, which is what makes one compile serve every resolution.
   const GeneratedProgram program = emit("gaussian:1.4,sobel");
@@ -367,7 +367,7 @@ TEST_CASE("every thread reaches the barrier before any thread bounds-checks", "[
 }
 
 TEST_CASE("the tile size is baked into the kernel", "[codegen]") {
-  // CLAUDE.md invariant 4 from the codegen end. The tile edge sizes the __shared__ array
+  // Invariant 4 from the codegen end. The tile edge sizes the __shared__ array
   // and the launch bound, so two sizes are two kernels — which is why tile_size, and not
   // just a naive|tiled flag, is in KernelKey (test_kernel_key.cpp asserts that side).
   const std::string small = emit_tiled("sobel", 8).source;

@@ -1,6 +1,6 @@
 #pragma once
 
-// The kernel cache key: every codegen input, and nothing else (CLAUDE.md invariant 4).
+// The kernel cache key: every codegen input, and nothing else (invariant 4).
 //
 // WIDTH AND HEIGHT ARE ABSENT BY CONSTRUCTION — there is no field to set and no
 // overload that takes them. They are launch-time kernel arguments; baking them would

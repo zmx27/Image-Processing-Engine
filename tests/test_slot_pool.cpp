@@ -1,6 +1,6 @@
 // The slot pool and the bounded queue (docs/PLAN.md Phase 4).
 //
-// These two types are where backpressure actually lives (CLAUDE.md invariant 5): a full
+// These two types are where backpressure actually lives (invariant 5): a full
 // pool blocks the reader, a full queue blocks it too, and neither ever drops a frame or
 // grows at runtime. Tested here in isolation, with threads but without sockets, so a
 // failure names the mechanism rather than the whole server.

@@ -14,7 +14,7 @@
 // IMGJIT_ENABLE_CUDA — they are the ones that actually call the driver.
 //
 // The input is a KernelKey rather than an OpChain because the key IS the complete
-// list of codegen inputs (CLAUDE.md invariant 4): taking anything else would mean a
+// list of codegen inputs (invariant 4): taking anything else would mean a
 // codegen input that the cache is not keyed by, which shows up as a stale cache hit —
 // a wrong benchmark number, not a crash. Note what the signature therefore cannot
 // take: width and height. They are launch arguments.

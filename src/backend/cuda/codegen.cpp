@@ -204,7 +204,7 @@ void emit_tap_function(std::ostringstream& out, const std::string& name, const S
 }
 
 // Baked stencil constants. Radius and weights are literals; width and height never
-// are (CLAUDE.md invariant 4). Returns the radius, which the kernel body needs.
+// are (invariant 4). Returns the radius, which the kernel body needs.
 int emit_stencil_constants(std::ostringstream& out, const std::string& name, const Op& stencil) {
   if (stencil.kind == OpKind::kSobel) {
     out << "\n__device__ const float " << name
@@ -381,7 +381,7 @@ GeneratedStage emit_stage(std::ostringstream& out, const std::string& name, cons
   // Every stage starts with the same four arguments, so the executor can ping-pong two
   // buffers through the whole chain without knowing what any stage does; a
   // parameterized stage appends its values after them, in param_ops order. Dimensions
-  // are parameters here and nowhere else — that is CLAUDE.md invariant 4 made structural.
+  // are parameters here and nowhere else — that is invariant 4 made structural.
   out << "\nextern \"C\" __global__ void ";
   if (tiled) {
     // Caps registers so that tile_size^2 threads always fit on an SM. Without it a 32x32
@@ -492,8 +492,7 @@ GeneratedProgram emit_cuda_source(const KernelKey& key) {
   }
   out << "//\n"
       << "// Width and height are absent from this source by construction: they are\n"
-      << "// launch arguments, so one compile serves every resolution (CLAUDE.md\n"
-      << "// invariant 4).\n"
+      << "// launch arguments, so one compile serves every resolution (invariant 4).\n"
       << kKernelPrelude;
   if (parameterized) {
     // Passed by value, so it lands in the kernel's parameter space like any scalar

@@ -12,7 +12,7 @@
 // project to be changing structure (docs/PLAN.md Phase 2).
 //
 // THREADING: every method here is called on the worker thread and only there. That
-// is not an incidental property of the CPU backend, it is CLAUDE.md invariant 1 for
+// is not an incidental property of the CPU backend, it is invariant 1 for
 // the CUDA one — which is why no implementation needs a lock.
 //
 // Portable: no CUDA, builds on macOS with no toolkit present. `allocate_slots`
@@ -34,7 +34,7 @@ namespace imgjit {
 
 // Backend-assigned. The server keeps handle -> {connection, seq_num, slot} and
 // releases the slot when the matching completion arrives — never before, and never
-// after the response is written (CLAUDE.md invariants 3 and 10).
+// after the response is written (invariants 3 and 10).
 using JobHandle = std::uint64_t;
 
 struct FrameJob {

@@ -3,7 +3,7 @@
 // The frame server: an acceptor thread, a reader and a writer thread per connection,
 // one bounded queue, and one worker thread that owns the backend.
 //
-// The thread layout is CLAUDE.md invariant 10, and both halves of it are load-bearing
+// The thread layout is invariant 10, and both halves of it are load-bearing
 // rather than stylistic (docs/ARCHITECTURE.md decision 6):
 //
 //   * THE WORKER NEVER TOUCHES A SOCKET. Completions go to a per-connection outbox that
@@ -18,7 +18,7 @@
 //
 // The backend is created BY the worker thread, not handed to it, which is why this
 // takes a factory rather than a unique_ptr. Phase 5 needs the driver context created on
-// the thread that will own it forever (CLAUDE.md invariant 1), and slot storage comes
+// the thread that will own it forever (invariant 1), and slot storage comes
 // from allocate_slots() on that same thread (invariant 2). Making that the shape now
 // means Phase 5 swaps the factory and changes nothing else in this file.
 //
@@ -95,7 +95,7 @@ class Server {
   // recoveries (docs/PLAN.md Phase 6). Snapshotted by the worker as it shuts down, so
   // this is only meaningful AFTER stop() has returned; before that it reads as zeroes.
   // Deliberately not live: the backend belongs to the worker thread and nothing else
-  // may call into it (CLAUDE.md invariant 1), and a lock on the submit path to make a
+  // may call into it (invariant 1), and a lock on the submit path to make a
   // debug counter readable would be a bad trade.
   BackendStats backend_stats() const;
 
