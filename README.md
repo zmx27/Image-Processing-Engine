@@ -1,5 +1,11 @@
 # imgjit — A Network-Accelerated, GPU-JIT Image Processing Engine
 
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white)
+![CUDA](https://img.shields.io/badge/CUDA-Driver%20API%20%2B%20NVRTC-76B900?logo=nvidia&logoColor=white)
+![CMake](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake&logoColor=white)
+![Sanitizers](https://img.shields.io/badge/tested%20with-ASan%20%2B%20TSan-orange)
+![License](https://img.shields.io/badge/license-MIT-informational)
+
 A native TCP server that takes a raw image frame and a filter chain (`"grayscale,gaussian:1.4,sobel,threshold:0.3"`),
 JIT-compiles that exact chain into a CUDA kernel at runtime with NVRTC, and runs it on the GPU
 through the raw CUDA Driver API — no `cudart`, no `<<<>>>`, no ahead-of-time kernel binary. The
@@ -9,6 +15,20 @@ fed continuously instead of stalling on the transfer or the compile.
 This is a from-scratch systems project, not a wrapper around an existing image library. Every
 kernel, every RAII wrapper around a CUDA handle, and every byte of the wire protocol is written in
 this repository.
+
+### What the chain above actually does
+
+Same input, run through the real `imgjit-cli --backend cpu --ops "grayscale,gaussian:1.4,sobel,threshold:0.3"` —
+grayscale flattens color, a Gaussian blur suppresses noise, Sobel finds gradients, and the
+threshold turns "gradient magnitude" into a clean binary edge map:
+
+<table>
+<tr><th>input</th><th>output</th></tr>
+<tr>
+<td><img src="docs/images/demo_input.png" width="360" alt="synthetic input frame: a red circle, a blue square, and a yellow triangle on a dark gradient background"></td>
+<td><img src="docs/images/demo_output.png" width="360" alt="the same frame after grayscale, gaussian:1.4, sobel, threshold:0.3 — clean white edge outlines on black"></td>
+</tr>
+</table>
 
 ## Table of contents
 
@@ -56,6 +76,22 @@ Three pieces, fused together:
    compute, and transfer-out on another stream.
 
 ### End-to-end data path
+
+The high-level shape — three worker roles handing a frame off through two queues:
+
+```mermaid
+flowchart LR
+    C["Client"] -->|"raw uint8 frame\n+ op-chain string"| R["Reader thread\nread_exact + validate\nclaim pinned slot"]
+    R -->|"push(FrameJob)"| Q[["Bounded MPSC queue"]]
+    Q -->|"pop"| G["GPU worker thread\n(sole CUcontext owner)"]
+    G <-->|"hit / miss"| K[("Kernel cache\nKernelKey → CUfunction")]
+    G -->|"H2D → launch → D2H\non a CUstream slot"| GPU[("GPU streams\n(K in flight)")]
+    G -->|"push(Completion)"| O[["Per-connection outbox"]]
+    O -->|"pop"| W["Writer thread"]
+    W -->|"echo and/or PNG"| C
+```
+
+The detailed version — what each stage actually does, byte-for-byte:
 
 ```
                      ┌──────────────── portable core — builds on macOS, no GPU ────────────────┐
@@ -315,6 +351,12 @@ utilization. Kernels never overlap *kernels*, since one 1024² image already fil
 four events, sweeping four slots — outweighs the copy it would hide, so `invert` measures ~6%
 *slower* at 4 streams. `K=4` is tuned for real multi-op chains, not a single passthrough op.)
 
+![Nsight Systems GPU timeline: 4 streams, H2D in blue, kernel in red, D2H in green, genuinely interleaved rather than laid end to end](bench/phase6_timeline.png)
+
+The actual captured trace, one row per stream: H2D (blue) and D2H (green) on one stream land
+underneath a kernel (red) running on another, rather than every stream's three phases stacking up
+end to end. That interleaving — not the fps number above — is what "genuine overlap" means.
+
 ### 2.5 Fault isolation & context recreation
 
 Async CUDA errors are sticky: they frequently surface at the *next* driver call rather than the one
@@ -407,7 +449,8 @@ image-processing/
 ├── docs/
 │   ├── PLAN.md                   # phased build log — what's done, what's next
 │   ├── ARCHITECTURE.md           # design rationale, the six load-bearing decisions
-│   └── PROTOCOL.md               # wire format spec, byte-for-byte
+│   ├── PROTOCOL.md               # wire format spec, byte-for-byte
+│   └── images/                   # demo frames and benchmark charts used in this README
 ├── colab/
 │   └── run.ipynb                 # clones, builds, runs the full test + benchmark matrix on a T4
 │
@@ -662,6 +705,17 @@ withdrawn and re-run resolution sweep — is written up in `bench/README.md`.
 | Multi-stream overlap | mean frames resident on the GPU | **2.61 of 4** (vs. 1.00 serial) |
 | Copy/compute overlap | H2D + D2H hidden behind compute | **539 of 612 ms** copy budget overlapped (~88%) |
 | Resolution scaling | 512²/1024² vs. 2048²/4096² throughput | within **1.1%** of each other; **−14.1%** at 2048², **−38.7%** at 4096² |
+
+<table>
+<tr>
+<td><img src="docs/images/tiling_kernel_time.png" width="420" alt="bar chart: shared-memory tiling kernel time by stencil, naive vs tile 16 vs tile 32"></td>
+<td><img src="docs/images/streams_throughput.png" width="420" alt="bar chart: multi-stream throughput, streams 1 vs streams 4, showcase chain vs invert"></td>
+</tr>
+<tr>
+<td><img src="docs/images/constants_tradeoff.png" width="420" alt="bar charts: constant baking kernel-time cost vs compile-count benefit"></td>
+<td><img src="docs/images/resolution_scaling.png" width="420" alt="bar chart: pixel throughput in megapixels per second across four resolutions"></td>
+</tr>
+</table>
 
 Every row above is session-to-session variable by several percent (kernel-time repeatability was
 measured at up to 9.2% across two independent runs) — treat these as directional confirmations of
